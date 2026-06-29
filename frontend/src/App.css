@@ -1,0 +1,295 @@
+/* App Container */
+.app-container {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  width: 100%;
+  position: relative;
+}
+
+/* =========================================
+   TẦNG 1: TOP HEADER
+========================================= */
+.top-header {
+  flex: 0 0 auto;
+  padding: 12px 16px;
+  background-color: #fff;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  z-index: 10;
+}
+
+.header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.file-name {
+  font-weight: 600;
+  font-size: 16px;
+  color: #1a1a1a;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 60vw;
+}
+
+.file-dropdown {
+  font-family: inherit;
+  font-weight: 600;
+  font-size: 15px;
+  color: #1a1a1a;
+  background-color: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 4px 0;
+  max-width: 60vw;
+  cursor: pointer;
+  outline: none;
+}
+.file-dropdown:hover, .file-dropdown:focus {
+  border: 1px solid #ddd;
+  background-color: #f8f9fa;
+}
+
+.header-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.upload-btn-wrapper {
+  position: relative;
+  overflow: hidden;
+  display: inline-block;
+  cursor: pointer;
+}
+.upload-btn-wrapper input[type=file] {
+  font-size: 100px;
+  position: absolute;
+  left: 0;
+  top: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.icon-btn {
+  background: none;
+  border: none;
+  padding: 8px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  background-color: #f0f2f5;
+  color: #1f77b4;
+  width: 36px;
+  height: 36px;
+}
+
+.stats-row {
+  display: flex;
+  gap: 24px;
+}
+.stat-box {
+  display: flex;
+  flex-direction: column;
+}
+.stat-label {
+  font-size: 11px;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.stat-value {
+  font-size: 18px;
+  font-weight: 700;
+  color: #1f77b4;
+}
+
+/* Info Popover */
+.info-popover {
+  position: absolute;
+  top: 50px;
+  right: 16px;
+  background: #fff;
+  padding: 12px;
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+  border: 1px solid #eee;
+  z-index: 20;
+  font-size: 13px;
+  min-width: 150px;
+}
+.info-popover p {
+  margin: 6px 0;
+  display: flex;
+  justify-content: space-between;
+}
+.info-popover span {
+  font-weight: 600;
+}
+
+/* =========================================
+   TẦNG 2: CHART AREA
+========================================= */
+.chart-container {
+  width: 100%;
+  aspect-ratio: 1 / 1; /* Tỉ lệ 1:1 (Vuông) tối ưu trên mobile để xem rõ biên độ nhiễu */
+  flex-shrink: 0; /* Ngăn biểu đồ bị ép lùn xuống khi danh sách ở dưới quá dài */
+  position: relative;
+  background-color: #fff;
+  border-bottom: 1px solid #eee;
+  touch-action: none;
+}
+.chart-tools {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 5;
+  display: flex;
+  gap: 8px;
+}
+.tool-btn {
+  background: rgba(255,255,255,0.9);
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 12px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+
+/* =========================================
+   TẦNG 3: EVENT DETAILS (GRID 2x2)
+========================================= */
+.event-details {
+  flex: 0 0 auto;
+  padding: 16px;
+  background-color: #f8f9fa;
+  border-bottom: 1px solid #eee;
+  min-height: 90px;
+}
+.event-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 16px;
+}
+.detail-item {
+  display: flex;
+  flex-direction: column;
+}
+.detail-label {
+  font-size: 11px;
+  color: #888;
+  margin-bottom: 2px;
+}
+.detail-value {
+  font-size: 14px;
+  font-weight: 600;
+  color: #333;
+}
+.value-red {
+  color: #d62728;
+}
+
+/* =========================================
+   TẦNG 4: EVENT LIST
+========================================= */
+.event-list-container {
+  background-color: #fff;
+  display: flex;
+  flex-direction: column;
+  margin-top: 8px;
+  padding-bottom: 40px; /* Thêm khoảng trống cuối trang */
+}
+.list-title {
+  padding: 12px 16px;
+  font-size: 15px;
+  font-weight: 700;
+  color: #333;
+  border-bottom: 1px solid #f0f0f0;
+  background-color: #fafafa;
+}
+.table-responsive {
+  width: 100%;
+  max-height: 50vh; /* Allow vertical scrolling inside the table */
+  overflow-x: auto;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.event-table {
+  width: 100%;
+  border-collapse: separate; /* Required for sticky borders */
+  border-spacing: 0;
+  min-width: 650px; /* Force scroll horizontally */
+  text-align: right;
+  font-size: 13px;
+}
+.event-table th, .event-table td {
+  padding: 12px 8px;
+  border-bottom: 1px solid #f5f5f5;
+  white-space: nowrap;
+}
+.event-table th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background-color: #fafafa;
+  color: #666;
+  font-weight: 600;
+  /* Use box-shadow instead of border-bottom for sticky elements */
+  box-shadow: 0 2px 0 0 #eee;
+}
+.event-table th:first-child, .event-table td:first-child {
+  text-align: left;
+}
+.event-table tbody tr {
+  background-color: #fff;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+.event-table tbody tr:active, .event-table tbody tr.selected {
+  background-color: #e6f7ff;
+}
+
+/* Cột đầu tiên Sticky */
+.sticky-col {
+  position: sticky;
+  left: 0;
+  background-color: inherit;
+  z-index: 1;
+  border-right: 1px solid #eee;
+}
+.event-table th.sticky-col {
+  background-color: #fafafa;
+  z-index: 3; /* Header sticky needs highest z-index */
+}
+.red {
+  color: #d62728;
+  font-weight: 600;
+}
+
+/* =========================================
+   EMPTY STATE
+========================================= */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: #888;
+  padding: 20px;
+  text-align: center;
+}
+.empty-state p {
+  margin-top: 16px;
+  font-size: 15px;
+}
