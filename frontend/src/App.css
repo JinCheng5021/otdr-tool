@@ -277,6 +277,93 @@
 }
 
 /* =========================================
+   UPLOAD & DRAG & DROP
+========================================= */
+.dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border: 2px dashed #1f77b4;
+  border-radius: 12px;
+  background-color: #f8fbff;
+  color: #1f77b4;
+  padding: 40px;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  width: 80%;
+  max-width: 600px;
+  margin: 40px auto;
+}
+.dropzone:hover, .dropzone.drag-active {
+  background-color: #e6f2ff;
+  border-color: #0b5394;
+}
+.dropzone h2 {
+  margin: 16px 0 8px 0;
+}
+.dropzone p {
+  color: #666;
+}
+
+.upload-modal-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.5);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.upload-modal-content {
+  background: #fff;
+  border-radius: 12px;
+  width: 90%;
+  max-width: 650px;
+  position: relative;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+  padding: 20px;
+}
+.upload-modal-close {
+  position: absolute;
+  top: 10px;
+  right: 15px;
+  background: none;
+  border: none;
+  font-size: 24px;
+  cursor: pointer;
+  color: #888;
+}
+.upload-modal-close:hover {
+  color: #333;
+}
+
+.global-drag-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(31, 119, 180, 0.85);
+  backdrop-filter: blur(5px);
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  pointer-events: none;
+}
+.global-drag-overlay-content {
+  text-align: center;
+  border: 4px dashed rgba(255,255,255,0.5);
+  border-radius: 20px;
+  padding: 40px 60px;
+}
+.global-drag-overlay h2 {
+  font-size: 32px;
+  margin-top: 20px;
+}
+
+/* =========================================
    EMPTY STATE
 ========================================= */
 .empty-state {

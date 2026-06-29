@@ -47,11 +47,15 @@ const App: React.FC = () => {
   const [loading, setLoading] = useState<boolean>(false);
   const [selectedEvent, setSelectedEvent] = useState<any>(null);
   const [showInfo, setShowInfo] = useState<boolean>(false);
+  
+  const [isDraggingGlobal, setIsDraggingGlobal] = useState<boolean>(false);
+  const [showUploadModal, setShowUploadModal] = useState<boolean>(false);
+  const [isDraggingLocal, setIsDraggingLocal] = useState<boolean>(false);
+  const dragCounter = useRef(0);
 
   const echartsRef = useRef<any>(null);
 
-  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const files = event.target.files;
+  const handleFiles = async (files: FileList) => {
     if (!files || files.length === 0) return;
 
     const formData = new FormData();
@@ -62,6 +66,8 @@ const App: React.FC = () => {
     setLoading(true);
     setSelectedEvent(null);
     setShowInfo(false);
+    setShowUploadModal(false);
+    
     try {
       const apiUrl = process.env.NODE_ENV === 'development'
         ? 'http://localhost:8000/api/upload-otdr'
@@ -78,6 +84,86 @@ const App: React.FC = () => {
       setLoading(false);
     }
   };
+
+  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    if (event.target.files) {
+      handleFiles(event.target.files);
+      event.target.value = '';
+    }
+  };
+
+  const onDragEnterGlobal = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounter.current++;
+    if (e.dataTransfer.items && e.dataTransfer.items.length > 0) {
+      setIsDraggingGlobal(true);
+    }
+  };
+
+  const onDragLeaveGlobal = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounter.current--;
+    if (dragCounter.current === 0) {
+      setIsDraggingGlobal(false);
+    }
+  };
+
+  const onDragOverGlobal = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  const onDropGlobal = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingGlobal(false);
+    dragCounter.current = 0;
+    
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      handleFiles(e.dataTransfer.files);
+    }
+  };
+
+  const renderDropzone = () => (
+    <div 
+      className={`dropzone ${isDraggingLocal ? 'drag-active' : ''}`}
+      onDragEnter={(e) => { e.preventDefault(); e.stopPropagation(); setIsDraggingLocal(true); }}
+      onDragLeave={(e) => { e.preventDefault(); e.stopPropagation(); setIsDraggingLocal(false); }}
+      onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
+      onDrop={(e) => { 
+        e.preventDefault(); 
+        e.stopPropagation(); 
+        setIsDraggingLocal(false); 
+        setIsDraggingGlobal(false);
+        dragCounter.current = 0;
+        if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+          handleFiles(e.dataTransfer.files);
+        }
+      }}
+      onClick={() => {
+        const fileInput = document.getElementById('dropzone-file-input') as HTMLInputElement;
+        if (fileInput) fileInput.click();
+      }}
+    >
+      <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+        <polyline points="17 8 12 3 7 8"></polyline>
+        <line x1="12" y1="3" x2="12" y2="15"></line>
+      </svg>
+      <h2>Kéo thả file vào đây</h2>
+      <p>Hoặc click để chọn file OTDR (.sor, .msor)</p>
+      <input 
+        id="dropzone-file-input" 
+        type="file" 
+        multiple 
+        accept=".sor,.msor,.trc" 
+        style={{ display: 'none' }} 
+        onChange={handleFileUpload} 
+      />
+    </div>
+  );
 
   const handleResetZoom = () => {
     if (echartsRef.current) {
@@ -212,7 +298,34 @@ const App: React.FC = () => {
   };
 
   return (
-    <div className="app-container">
+    <div 
+      className="app-container"
+      onDragEnter={onDragEnterGlobal}
+      onDragLeave={onDragLeaveGlobal}
+      onDragOver={onDragOverGlobal}
+      onDrop={onDropGlobal}
+    >
+      {isDraggingGlobal && (
+        <div className="global-drag-overlay">
+          <div className="global-drag-overlay-content">
+            <svg width="80" height="80" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+              <polyline points="17 8 12 3 7 8"></polyline>
+              <line x1="12" y1="3" x2="12" y2="15"></line>
+            </svg>
+            <h2>Thả file vào đây để tải lên...</h2>
+          </div>
+        </div>
+      )}
+
+      {showUploadModal && (
+        <div className="upload-modal-overlay" onClick={() => setShowUploadModal(false)}>
+          <div className="upload-modal-content" onClick={e => e.stopPropagation()}>
+            <button className="upload-modal-close" onClick={() => setShowUploadModal(false)}>&times;</button>
+            {renderDropzone()}
+          </div>
+        </div>
+      )}
       {/* TẦNG 1: TOP HEADER */}
       <div className="top-header">
         <div className="header-row">
@@ -230,14 +343,13 @@ const App: React.FC = () => {
 
           <div className="header-actions">
             <div className="upload-btn-wrapper">
-              <button className="icon-btn" title="Tải file mới">
+              <button className="icon-btn" title="Tải file mới" onClick={() => setShowUploadModal(true)}>
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
                   <polyline points="17 8 12 3 7 8"></polyline>
                   <line x1="12" y1="3" x2="12" y2="15"></line>
                 </svg>
               </button>
-              <input type="file" multiple accept=".sor,.msor,.trc" onChange={handleFileUpload} />
             </div>
 
             {currentApiData && (
@@ -291,11 +403,7 @@ const App: React.FC = () => {
 
       {!loading && !currentApiData && (
         <div className="empty-state">
-          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#ccc" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round" style={{ marginBottom: 10 }}>
-            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
-          </svg>
-          <h2>Chưa có dữ liệu</h2>
-          <p>Vui lòng tải lên file đo OTDR (.sor, .msor)</p>
+          {renderDropzone()}
         </div>
       )}
 
