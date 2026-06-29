@@ -169,8 +169,8 @@ const App: React.FC = () => {
       if (params.componentType === 'markPoint') {
         setSelectedEvent({
           name: params.data.name,
-          distance: params.data.coord[0].toFixed(4),
-          loss_y: params.data.coord[1].toFixed(3),
+          distance: Number(params.data.coord[0]).toFixed(3),
+          loss_y: Number(params.data.coord[1]).toFixed(3),
           type: params.data.value,
           splice_loss: params.data.eventData.splice_loss_db,
           reflectance: params.data.eventData.reflectance_db,
@@ -332,12 +332,14 @@ const App: React.FC = () => {
                 <div className="detail-item">
                   <span className="detail-label">Suy hao điểm</span>
                   <span className={`detail-value ${Number(selectedEvent.splice_loss) > 0.1 ? 'value-red' : ''}`}>
-                    {selectedEvent.splice_loss} dB
+                    {Number(selectedEvent.splice_loss).toFixed(3)} dB
                   </span>
                 </div>
                 <div className="detail-item">
                   <span className="detail-label">Phản xạ</span>
-                  <span className="detail-value">{selectedEvent.reflectance} dB</span>
+                  <span className="detail-value">
+                    {selectedEvent.reflectance != null ? `${Number(selectedEvent.reflectance).toFixed(3)} dB` : ''}
+                  </span>
                 </div>
                 <div className="detail-item">
                   <span className="detail-label">Hệ số suy hao</span>
@@ -382,12 +384,12 @@ const App: React.FC = () => {
                         <EventIcon type={ev.event_type} />
                         {ev.event_number}
                       </td>
-                      <td>{ev.distance_km.toFixed(3)}</td>
-                      <td className={ev.splice_loss_db > 0.1 ? 'red' : ''}>{ev.splice_loss_db.toFixed(3)}</td>
-                      <td>{ev.reflectance_db.toFixed(3)}</td>
-                      <td>{ev.slope_db_km.toFixed(3)}</td>
-                      <td>{ev.section_loss_db.toFixed(3)}</td>
-                      <td>{ev.cumulative_loss_db.toFixed(3)}</td>
+                      <td>{Number(ev.distance_km).toFixed(3)}</td>
+                      <td className={ev.splice_loss_db > 0.1 ? 'red' : ''}>{Number(ev.splice_loss_db).toFixed(3)}</td>
+                      <td>{ev.reflectance_db != null ? Number(ev.reflectance_db).toFixed(3) : ''}</td>
+                      <td>{Number(ev.slope_db_km).toFixed(3)}</td>
+                      <td>{Number(ev.section_loss_db).toFixed(3)}</td>
+                      <td>{Number(ev.cumulative_loss_db).toFixed(3)}</td>
                     </tr>
                   ))}
                 </tbody>

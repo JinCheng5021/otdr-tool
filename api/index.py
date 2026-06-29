@@ -69,11 +69,15 @@ class BaseOTDRParser(ABC):
             
             cumulative_loss_db += section_loss_db + prev_splice_loss
             
+            reflectance = ev.get('reflection_loss', 0.0)
+            if reflectance == 0.0 or reflectance < -10000 or reflectance > 10000:
+                reflectance = None
+            
             events.append({
                 "event_number": ev.get('event_number'),
                 "distance_km": distance_km,
                 "splice_loss_db": ev.get('splice_loss', 0.0),
-                "reflectance_db": ev.get('reflection_loss', 0.0),
+                "reflectance_db": reflectance,
                 "slope_db_km": slope,
                 "section_loss_db": section_loss_db,
                 "cumulative_loss_db": cumulative_loss_db,
