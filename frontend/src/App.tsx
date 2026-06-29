@@ -58,28 +58,38 @@ const App: React.FC = () => {
   const handleFiles = async (files: FileList) => {
     if (!files || files.length === 0) return;
 
-    const formData = new FormData();
-    for (let i = 0; i < files.length; i++) {
-      formData.append('files', files[i]);
-    }
-
     setLoading(true);
     setSelectedEvent(null);
     setShowInfo(false);
     setShowUploadModal(false);
     
-    try {
-      const apiUrl = process.env.NODE_ENV === 'development'
-        ? 'http://localhost:8000/api/upload-otdr'
-        : '/api/upload-otdr';
+    const apiUrl = process.env.NODE_ENV === 'development'
+      ? 'http://localhost:8000/api/upload-otdr'
+      : '/api/upload-otdr';
 
-      const response = await axios.post<{ results: APIResponse[] }>(apiUrl, formData, {
-        headers: { 'Content-Type': 'multipart/form-data' }
-      });
-      setApiDataList(response.data.results);
-      setCurrentFileIndex(0);
-    } catch (error: any) {
-      alert(error.response?.data?.detail || 'Lỗi xử lý file.');
+    let totalItems = apiDataList.length;
+
+    try {
+      for (let i = 0; i < files.length; i++) {
+        const formData = new FormData();
+        formData.append('files', files[i]);
+        
+        try {
+          const response = await axios.post<{ results: APIResponse[] }>(apiUrl, formData, {
+            headers: { 'Content-Type': 'multipart/form-data' }
+          });
+          
+          if (response.data.results && response.data.results.length > 0) {
+            const newResults = response.data.results;
+            setApiDataList(prev => [...prev, ...newResults]);
+            totalItems += newResults.length;
+            setCurrentFileIndex(totalItems - 1);
+          }
+        } catch (err: any) {
+          console.error(`Lỗi xử lý file ${files[i].name}:`, err);
+          alert(`Lỗi khi tải lên file ${files[i].name}: ${err.response?.data?.detail || err.message}`);
+        }
+      }
     } finally {
       setLoading(false);
     }
@@ -90,6 +100,18 @@ const App: React.FC = () => {
       handleFiles(event.target.files);
       event.target.value = '';
     }
+  };
+
+  const handleDeleteCurrentFile = () => {
+    setApiDataList(prev => {
+      const newList = prev.filter((_, idx) => idx !== currentFileIndex);
+      if (newList.length === 0) {
+        setCurrentFileIndex(0);
+      } else if (currentFileIndex >= newList.length) {
+        setCurrentFileIndex(newList.length - 1);
+      }
+      return newList;
+    });
   };
 
   const onDragEnterGlobal = (e: React.DragEvent) => {
@@ -342,6 +364,16 @@ const App: React.FC = () => {
           </div>
 
           <div className="header-actions">
+            {currentApiData && (
+              <button className="icon-btn-danger" onClick={handleDeleteCurrentFile} title="Xóa file này">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="3 6 5 6 21 6"></polyline>
+                  <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                  <line x1="10" y1="11" x2="10" y2="17"></line>
+                  <line x1="14" y1="11" x2="14" y2="17"></line>
+                </svg>
+              </button>
+            )}
             <div className="upload-btn-wrapper">
               <button className="icon-btn" title="Tải file mới" onClick={() => setShowUploadModal(true)}>
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
