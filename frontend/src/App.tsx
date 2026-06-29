@@ -12,6 +12,8 @@ interface Trace {
     number_of_data_points: number;
     total_loss: number;
     fiber_length: number;
+    measurement_date: string;
+    machine_type: string;
   };
   data: number[][];
   events: any[];
@@ -41,11 +43,11 @@ const EventIcon: React.FC<{ type: string }> = ({ type }) => {
 const App: React.FC = () => {
   const [apiDataList, setApiDataList] = useState<APIResponse[]>([]);
   const [currentFileIndex, setCurrentFileIndex] = useState<number>(0);
-  
+
   const [loading, setLoading] = useState<boolean>(false);
   const [selectedEvent, setSelectedEvent] = useState<any>(null);
   const [showInfo, setShowInfo] = useState<boolean>(false);
-  
+
   const echartsRef = useRef<any>(null);
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -61,11 +63,11 @@ const App: React.FC = () => {
     setSelectedEvent(null);
     setShowInfo(false);
     try {
-      const apiUrl = process.env.NODE_ENV === 'development' 
-        ? 'http://localhost:8000/api/upload-otdr' 
+      const apiUrl = process.env.NODE_ENV === 'development'
+        ? 'http://localhost:8000/api/upload-otdr'
         : '/api/upload-otdr';
 
-      const response = await axios.post<{results: APIResponse[]}>(apiUrl, formData, {
+      const response = await axios.post<{ results: APIResponse[] }>(apiUrl, formData, {
         headers: { 'Content-Type': 'multipart/form-data' }
       });
       setApiDataList(response.data.results);
@@ -104,14 +106,14 @@ const App: React.FC = () => {
         name: `Sự kiện ${ev.event_number}`,
         coord: [ev.distance_km, trace.data.find(pt => pt[0] >= ev.distance_km)?.[1] || 0],
         value: ev.event_type,
-        label: { 
-          show: true, 
-          position: 'bottom', 
+        label: {
+          show: true,
+          position: 'bottom',
           distance: 4,
-          fontSize: 11, 
+          fontSize: 11,
           fontWeight: 'bold',
-          color: '#1f77b4', 
-          formatter: `${ev.event_number}` 
+          color: '#1f77b4',
+          formatter: `${ev.event_number}`
         },
         eventData: ev
       }));
@@ -132,10 +134,10 @@ const App: React.FC = () => {
           symbol: 'path://M 46 0 L 54 0 L 54 80 L 100 100 L 0 100 L 46 80 Z',
           symbolSize: [14, 60],
           symbolOffset: [0, '15%'],
-          itemStyle: { 
-            color: 'transparent', 
-            borderColor: '#1f77b4', 
-            borderWidth: 1.5 
+          itemStyle: {
+            color: 'transparent',
+            borderColor: '#1f77b4',
+            borderWidth: 1.5
           },
           emphasis: {
             itemStyle: { color: 'rgba(31, 119, 180, 0.1)', borderColor: '#d62728', borderWidth: 2 },
@@ -158,7 +160,7 @@ const App: React.FC = () => {
       xAxis: { type: 'value', name: 'km', nameGap: 5, scale: true },
       yAxis: { type: 'value', name: 'dB', nameGap: 5, scale: true },
       dataZoom: [
-        { type: 'inside', xAxisIndex: 0 }, 
+        { type: 'inside', xAxisIndex: 0 },
       ],
       series: seriesList
     };
@@ -186,7 +188,7 @@ const App: React.FC = () => {
   const handleRowClick = (ev: any, trace: Trace) => {
     const pt = trace.data.find(p => p[0] >= ev.distance_km);
     const loss_y = pt ? pt[1].toFixed(3) : 0;
-    
+
     setSelectedEvent({
       name: `Sự kiện ${ev.event_number}`,
       distance: ev.distance_km.toFixed(4),
@@ -200,7 +202,7 @@ const App: React.FC = () => {
 
     if (echartsRef.current) {
       const echartInstance = echartsRef.current.getEchartsInstance();
-      
+
       echartInstance.dispatchAction({
         type: 'dataZoom',
         startValue: Math.max(0, ev.distance_km - 0.3),
@@ -225,7 +227,7 @@ const App: React.FC = () => {
               currentApiData ? currentApiData.filename : 'Chưa tải file OTDR'
             )}
           </div>
-          
+
           <div className="header-actions">
             <div className="upload-btn-wrapper">
               <button className="icon-btn" title="Tải file mới">
@@ -269,6 +271,8 @@ const App: React.FC = () => {
 
         {showInfo && currentApiData && (
           <div className="info-popover">
+            <p><span>Ngày đo:</span> {currentApiData.traces[0].metadata.measurement_date}</p>
+            <p><span>Loại máy:</span> {currentApiData.traces[0].metadata.machine_type}</p>
             <p><span>Bước sóng:</span> {currentApiData.traces[0].metadata.wavelength}</p>
             <p><span>Xung:</span> {currentApiData.traces[0].metadata.pulse_width}</p>
             <p><span>IOR:</span> {currentApiData.traces[0].metadata.index_of_refraction}</p>
@@ -278,7 +282,7 @@ const App: React.FC = () => {
 
       {loading && (
         <div className="empty-state">
-          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#1f77b4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{animation: 'App-logo-spin infinite 2s linear'}}>
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#1f77b4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ animation: 'App-logo-spin infinite 2s linear' }}>
             <path d="M21 12a9 9 0 1 1-6.219-8.56"></path>
           </svg>
           <p>Đang xử lý...</p>
@@ -287,7 +291,7 @@ const App: React.FC = () => {
 
       {!loading && !currentApiData && (
         <div className="empty-state">
-          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#ccc" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round" style={{marginBottom: 10}}>
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#ccc" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round" style={{ marginBottom: 10 }}>
             <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
           </svg>
           <h2>Chưa có dữ liệu</h2>
@@ -331,7 +335,7 @@ const App: React.FC = () => {
                 </div>
                 <div className="detail-item">
                   <span className="detail-label">Suy hao điểm</span>
-                  <span className={`detail-value ${Number(selectedEvent.splice_loss) > 0.1 ? 'value-red' : ''}`}>
+                  <span className={`detail-value ${Number(selectedEvent.splice_loss) > 0.5 ? 'value-red' : ''}`}>
                     {Number(selectedEvent.splice_loss).toFixed(3)} dB
                   </span>
                 </div>
@@ -375,8 +379,8 @@ const App: React.FC = () => {
                 </thead>
                 <tbody>
                   {currentApiData.traces[0].events.map((ev, idx) => (
-                    <tr 
-                      key={idx} 
+                    <tr
+                      key={idx}
                       className={selectedEvent && selectedEvent.name === `Sự kiện ${ev.event_number}` ? 'selected' : ''}
                       onClick={() => handleRowClick(ev, currentApiData.traces[0])}
                     >
@@ -385,7 +389,7 @@ const App: React.FC = () => {
                         {ev.event_number}
                       </td>
                       <td>{Number(ev.distance_km).toFixed(3)}</td>
-                      <td className={ev.splice_loss_db > 0.1 ? 'red' : ''}>{Number(ev.splice_loss_db).toFixed(3)}</td>
+                      <td className={ev.splice_loss_db > 0.5 ? 'red' : ''}>{Number(ev.splice_loss_db).toFixed(3)}</td>
                       <td>{ev.reflectance_db != null ? Number(ev.reflectance_db).toFixed(3) : ''}</td>
                       <td>{Number(ev.slope_db_km).toFixed(3)}</td>
                       <td>{Number(ev.section_loss_db).toFixed(3)}</td>

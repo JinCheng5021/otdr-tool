@@ -35,16 +35,35 @@ class BaseOTDRParser(ABC):
         Hàm dùng chung để chuyển đổi cấu trúc danh sách block của otdrparser 
         thành cấu trúc dữ liệu chuẩn gọn gàng phục vụ cho Frontend.
         """
+        import datetime
         # Chuyển đổi list thành dict dựa trên key 'name' đã thu thập từ Terminal thực tế
         block_dict = {b.get('name', 'Unknown'): b for b in blocks_list if isinstance(b, dict)}
         
         # Đọc FxdParams (Dựa chính xác vào cấu trúc key snake_case từ kết quả test)
         fxd_params = block_dict.get('FxdParams', {})
+        sup_params = block_dict.get('SupParams', {})
+
+        # Xử lý Ngày đo
+        timestamp = fxd_params.get('date_time')
+        measurement_date = ""
+        if timestamp:
+            measurement_date = datetime.datetime.fromtimestamp(timestamp).strftime('%d/%m/%Y %H:%M:%S')
+
+        # Xử lý Loại máy
+        vendor = sup_params.get('supplier_name', '')
+        otdr = sup_params.get('otdr_name', '')
+        module = sup_params.get('module_name', '')
+        machine_type = f"{vendor} {otdr} {module}".strip()
+        if not machine_type:
+            machine_type = "Unknown"
+
         metadata = {
             "wavelength": f"{fxd_params.get('wavelength', 0)} nm",
             "pulse_width": f"{fxd_params.get('pulse_width', 0)} ns",
             "index_of_refraction": fxd_params.get('index_of_refraction', 1.468),
-            "number_of_data_points": fxd_params.get('number_of_data_points', 0)
+            "number_of_data_points": fxd_params.get('number_of_data_points', 0),
+            "measurement_date": measurement_date,
+            "machine_type": machine_type
         }
 
         # Đọc DataPts
