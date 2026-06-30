@@ -205,6 +205,7 @@ class OTDRParserFactory:
 # 4. API ENDPOINT (ỨNG DỤNG CHÍNH)
 # ==========================================
 @app.post("/api/upload-otdr")
+@app.post("/upload-otdr")
 async def upload_otdr(files: List[UploadFile] = File(...)):
     results = []
     
