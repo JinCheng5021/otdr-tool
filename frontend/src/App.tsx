@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import MobileLayout from './MobileLayout';
 import DesktopLayout from './DesktopLayout';
@@ -85,6 +85,42 @@ const App: React.FC = () => {
     });
   };
 
+  const dragCounter = useRef(0);
+  const [isDraggingGlobal, setIsDraggingGlobal] = useState(false);
+
+  const handleDragEnter = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounter.current += 1;
+    if (e.dataTransfer.items && e.dataTransfer.items.length > 0) {
+      setIsDraggingGlobal(true);
+    }
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounter.current -= 1;
+    if (dragCounter.current === 0) {
+      setIsDraggingGlobal(false);
+    }
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingGlobal(false);
+    dragCounter.current = 0;
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      handleFiles(e.dataTransfer.files);
+    }
+  };
+
   const sharedProps = {
     apiDataList,
     currentFileIndex,
@@ -97,11 +133,30 @@ const App: React.FC = () => {
     setSelectedEvent,
   };
 
-  if (isDesktop) {
-    return <DesktopLayout {...sharedProps} />;
-  }
-
-  return <MobileLayout {...sharedProps} />;
+  return (
+    <div
+      className="app-container"
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      {isDraggingGlobal && (
+        <div className="global-drag-overlay">
+          <div className="global-drag-overlay-content">
+            <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+              <polyline points="17 8 12 3 7 8"></polyline>
+              <line x1="12" y1="3" x2="12" y2="15"></line>
+            </svg>
+            <h2>Kéo thả file vào đây</h2>
+            <p>Hỗ trợ định dạng .sor, .msor, .trc</p>
+          </div>
+        </div>
+      )}
+      {isDesktop ? <DesktopLayout {...sharedProps} /> : <MobileLayout {...sharedProps} />}
+    </div>
+  );
 };
 
 export default App;
