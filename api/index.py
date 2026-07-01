@@ -4,6 +4,7 @@ from fastapi.responses import JSONResponse
 from abc import ABC, abstractmethod
 from typing import List
 import io
+import struct
 import otdrparser
 
 app = FastAPI(title="Factory OTDR Core Parser")
@@ -72,6 +73,27 @@ class BaseOTDRParser(ABC):
         raw_points = data_pts_block.get('data_points', [])
         chart_data = [[float(pt[0]) / 1000.0, float(pt[1])] for pt in raw_points]
 
+        # Xử lý JDSUEvenementsMTS (nếu có) để lấy section loss chính xác
+        has_jdsu = 'JDSUEvenementsMTS' in block_dict
+        loss_lookup = {}
+        dist_lookup = {}
+        if has_jdsu:
+            jdsu_content = block_dict['JDSUEvenementsMTS'].get('content', b'')
+            base_offset = 6
+            stride = 140
+            total_bytes = len(jdsu_content)
+            for offset in range(base_offset, total_bytes - stride + 1, stride):
+                try:
+                    s_loss = struct.unpack('>d', jdsu_content[offset : offset + 8])[0]
+                    dist_km = struct.unpack('>d', jdsu_content[offset + 40 : offset + 48])[0]
+                    evt_idx = struct.unpack('>i', jdsu_content[offset + 68 : offset + 72])[0]
+                    
+                    if s_loss > -99000.0:
+                        loss_lookup[evt_idx] = s_loss
+                        dist_lookup[evt_idx] = dist_km * 1000.0
+                except struct.error:
+                    continue
+
         # Đọc KeyEvents
         key_events_block = block_dict.get('KeyEvents', {})
         raw_events = key_events_block.get('events', [])
@@ -80,13 +102,33 @@ class BaseOTDRParser(ABC):
         cumulative_loss_db = 0.0
         prev_splice_loss = 0.0
         
-        for ev in raw_events:
+        for index, ev in enumerate(raw_events):
             raw_distance_m = ev.get('distance_of_travel', 0.0)
             distance_km = float(raw_distance_m) / 1000.0
             slope = ev.get('slope', 0.0)
-            section_loss_db = slope * (distance_km - prev_distance_km)
             
-            cumulative_loss_db += section_loss_db + prev_splice_loss
+            if has_jdsu:
+                section_loss = loss_lookup.get(index, None)
+                if section_loss is None:
+                    min_diff = float('inf')
+                    for idx, d_m in dist_lookup.items():
+                        diff = abs(d_m - raw_distance_m)
+                        if diff < min_diff and diff < 15.0:
+                            min_diff = diff
+                            section_loss = loss_lookup[idx]
+                
+                if section_loss is None or index == 0:
+                    section_loss_db = 0.0
+                else:
+                    section_loss_db = section_loss
+            else:
+                section_loss_db = slope * (distance_km - prev_distance_km)
+            
+            if index == 1:
+                # Không cộng prev_splice_loss (của event đầu tiên)
+                cumulative_loss_db += section_loss_db
+            else:
+                cumulative_loss_db += section_loss_db + prev_splice_loss
             
             reflectance = ev.get('reflection_loss', 0.0)
             if reflectance == 0.0 or reflectance < -10000 or reflectance > 10000:
