@@ -338,13 +338,13 @@ const MobileLayout: React.FC<SharedLayoutProps> = ({
             <div className="stat-box">
               <span className="stat-label">Chiều dài tuyến</span>
               <span className="stat-value">
-                {(currentApiData.traces[0].metadata.fiber_length / 1000).toFixed(3)} km
+                {currentApiData.traces[0].metadata.fiber_length === 0 ? '' : `${(currentApiData.traces[0].metadata.fiber_length / 1000).toFixed(3)} km`}
               </span>
             </div>
             <div className="stat-box">
               <span className="stat-label">Tổng suy hao</span>
               <span className="stat-value">
-                {currentApiData.traces[0].metadata.total_loss.toFixed(3)} dB
+                {currentApiData.traces[0].metadata.total_loss === 0 ? '' : `${currentApiData.traces[0].metadata.total_loss.toFixed(3)} dB`}
               </span>
             </div>
           </div>
@@ -408,27 +408,27 @@ const MobileLayout: React.FC<SharedLayoutProps> = ({
                 </div>
                 <div className="detail-item">
                   <span className="detail-label">Vị trí</span>
-                  <span className="detail-value">{selectedEvent.distance} km</span>
+                  <span className="detail-value">{Number(selectedEvent.distance) === 0 ? '' : `${selectedEvent.distance} km`}</span>
                 </div>
                 <div className="detail-item">
                   <span className="detail-label">Suy hao điểm</span>
                   <span className={`detail-value ${Number(selectedEvent.splice_loss) > 0.5 ? 'value-red' : ''}`}>
-                    {Number(selectedEvent.splice_loss).toFixed(3)} dB
+                    {Number(selectedEvent.splice_loss) === 0 ? '' : `${Number(selectedEvent.splice_loss).toFixed(3)} dB`}
                   </span>
                 </div>
                 <div className="detail-item">
                   <span className="detail-label">Phản xạ</span>
                   <span className="detail-value">
-                    {selectedEvent.reflectance != null ? `${Number(selectedEvent.reflectance).toFixed(3)} dB` : ''}
+                    {selectedEvent.reflectance == null || Number(selectedEvent.reflectance) === 0 ? '' : `${Number(selectedEvent.reflectance).toFixed(3)} dB`}
                   </span>
                 </div>
                 <div className="detail-item">
                   <span className="detail-label">Hệ số suy hao</span>
-                  <span className="detail-value">{Number(selectedEvent.slope).toFixed(3)} dB/km</span>
+                  <span className="detail-value">{Number(selectedEvent.slope) === 0 ? '' : `${Number(selectedEvent.slope).toFixed(3)} dB/km`}</span>
                 </div>
                 <div className="detail-item">
                   <span className="detail-label">Section Loss</span>
-                  <span className="detail-value">{Number(selectedEvent.section_loss).toFixed(3)} dB</span>
+                  <span className="detail-value">{Number(selectedEvent.section_loss) === 0 ? '' : `${Number(selectedEvent.section_loss).toFixed(3)} dB`}</span>
                 </div>
               </div>
             ) : (
@@ -465,12 +465,12 @@ const MobileLayout: React.FC<SharedLayoutProps> = ({
                         <EventIcon type={ev.event_type} />
                         {ev.event_number}
                       </td>
-                      <td>{Number(ev.distance_km).toFixed(3)}</td>
-                      <td className={ev.splice_loss_db > 0.5 ? 'red' : ''}>{Number(ev.splice_loss_db).toFixed(3)}</td>
-                      <td>{ev.reflectance_db != null ? Number(ev.reflectance_db).toFixed(3) : ''}</td>
-                      <td>{Number(ev.slope_db_km).toFixed(3)}</td>
-                      <td>{Number(ev.section_loss_db).toFixed(3)}</td>
-                      <td>{Number(ev.cumulative_loss_db).toFixed(3)}</td>
+                      <td>{Number(ev.distance_km) === 0 ? '' : Number(ev.distance_km).toFixed(3)}</td>
+                      <td className={ev.splice_loss_db > 0.5 ? 'red' : ''}>{Number(ev.splice_loss_db) === 0 ? '' : Number(ev.splice_loss_db).toFixed(3)}</td>
+                      <td>{ev.reflectance_db == null || Number(ev.reflectance_db) === 0 ? '' : Number(ev.reflectance_db).toFixed(3)}</td>
+                      <td>{Number(ev.slope_db_km) === 0 ? '' : Number(ev.slope_db_km).toFixed(3)}</td>
+                      <td>{Number(ev.section_loss_db) === 0 ? '' : Number(ev.section_loss_db).toFixed(3)}</td>
+                      <td>{Number(ev.cumulative_loss_db) === 0 ? '' : Number(ev.cumulative_loss_db).toFixed(3)}</td>
                     </tr>
                   ))}
                 </tbody>
