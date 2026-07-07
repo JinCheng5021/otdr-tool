@@ -1,5 +1,6 @@
 import React, { useState, useRef } from 'react';
 import ReactECharts from 'echarts-for-react';
+import { exportToPdf } from './exportPdf';
 import './App.css';
 
 import { SharedLayoutProps, Trace } from './types';
@@ -18,19 +19,19 @@ const EventIcon: React.FC<{ type: string }> = ({ type }) => {
   );
 };
 
-const MobileLayout: React.FC<SharedLayoutProps> = ({ 
-  apiDataList, 
-  currentFileIndex, 
-  loading, 
-  selectedEvent, 
-  handleFiles, 
-  handleFileUpload, 
-  handleDeleteCurrentFile, 
-  setCurrentFileIndex, 
-  setSelectedEvent 
+const MobileLayout: React.FC<SharedLayoutProps> = ({
+  apiDataList,
+  currentFileIndex,
+  loading,
+  selectedEvent,
+  handleFiles,
+  handleFileUpload,
+  handleDeleteCurrentFile,
+  setCurrentFileIndex,
+  setSelectedEvent
 }) => {
   const [showInfo, setShowInfo] = useState<boolean>(false);
-  
+
   const [isDraggingGlobal, setIsDraggingGlobal] = useState<boolean>(false);
   const [showUploadModal, setShowUploadModal] = useState<boolean>(false);
   const [isDraggingLocal, setIsDraggingLocal] = useState<boolean>(false);
@@ -79,22 +80,22 @@ const MobileLayout: React.FC<SharedLayoutProps> = ({
     e.stopPropagation();
     setIsDraggingGlobal(false);
     dragCounter.current = 0;
-    
+
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
       handleFilesLocal(e.dataTransfer.files);
     }
   };
 
   const renderDropzone = () => (
-    <div 
+    <div
       className={`dropzone ${isDraggingLocal ? 'drag-active' : ''}`}
       onDragEnter={(e) => { e.preventDefault(); e.stopPropagation(); setIsDraggingLocal(true); }}
       onDragLeave={(e) => { e.preventDefault(); e.stopPropagation(); setIsDraggingLocal(false); }}
       onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
-      onDrop={(e) => { 
-        e.preventDefault(); 
-        e.stopPropagation(); 
-        setIsDraggingLocal(false); 
+      onDrop={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setIsDraggingLocal(false);
         setIsDraggingGlobal(false);
         dragCounter.current = 0;
         if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
@@ -113,13 +114,13 @@ const MobileLayout: React.FC<SharedLayoutProps> = ({
       </svg>
       <h2>Kéo thả file vào đây</h2>
       <p>Hoặc click để chọn file OTDR (.sor, .msor)</p>
-      <input 
-        id="dropzone-file-input" 
-        type="file" 
-        multiple 
-        accept=".sor,.msor,.trc" 
-        style={{ display: 'none' }} 
-        onChange={handleFileUploadLocal} 
+      <input
+        id="dropzone-file-input"
+        type="file"
+        multiple
+        accept=".sor,.msor,.trc"
+        style={{ display: 'none' }}
+        onChange={handleFileUploadLocal}
       />
     </div>
   );
@@ -189,6 +190,16 @@ const MobileLayout: React.FC<SharedLayoutProps> = ({
             symbolSize: [16, 65],
             label: { color: '#d62728' }
           },
+          tooltip: {
+            show: true,
+            showContent: true,
+            trigger: 'item',
+            triggerOn: 'click',
+            formatter: (params: any) => {
+              const spliceLoss = params.data.eventData.splice_loss_db || 0;
+              return `<b>${params.data.name}</b><br/>Distance: ${Number(params.data.coord[0]).toFixed(3)} km<br/>Splice Loss: ${Number(spliceLoss).toFixed(3)} dB`;
+            }
+          },
           data: markPoints
         }
       };
@@ -201,7 +212,11 @@ const MobileLayout: React.FC<SharedLayoutProps> = ({
         left: 40,
         right: 20
       },
-      tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
+      tooltip: {
+        trigger: 'axis',
+        axisPointer: { type: 'cross' },
+        showContent: false
+      },
       xAxis: { type: 'value', name: 'km', nameGap: 5, scale: true },
       yAxis: { type: 'value', name: 'dB', nameGap: 5, scale: true },
       dataZoom: [
@@ -213,6 +228,8 @@ const MobileLayout: React.FC<SharedLayoutProps> = ({
 
   const onChartEvents = {
     click: (params: any) => {
+      const echartInstance = echartsRef.current?.getEchartsInstance();
+
       if (params.componentType === 'markPoint') {
         setSelectedEvent({
           name: params.data.name,
@@ -226,6 +243,22 @@ const MobileLayout: React.FC<SharedLayoutProps> = ({
         });
       } else {
         setSelectedEvent(null);
+        if (echartInstance) {
+          echartInstance.dispatchAction({
+            type: 'hideTip'
+          });
+        }
+      }
+    },
+    'zr:click': (params: any) => {
+      if (!params.target) {
+        setSelectedEvent(null);
+        const echartInstance = echartsRef.current?.getEchartsInstance();
+        if (echartInstance) {
+          echartInstance.dispatchAction({
+            type: 'hideTip'
+          });
+        }
       }
     }
   };
@@ -257,7 +290,7 @@ const MobileLayout: React.FC<SharedLayoutProps> = ({
   };
 
   return (
-    <div 
+    <div
       className="app-container"
       onDragEnter={onDragEnterGlobal}
       onDragLeave={onDragLeaveGlobal}
@@ -311,6 +344,21 @@ const MobileLayout: React.FC<SharedLayoutProps> = ({
                 </svg>
               </button>
             )}
+            
+            {currentApiData && (
+              <button 
+                className="icon-btn" 
+                title="Xuất báo cáo PDF" 
+                onClick={() => exportToPdf(currentApiData, getChartOptions(), currentApiData.filename)}
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                  <polyline points="7 10 12 15 17 10"></polyline>
+                  <line x1="12" y1="15" x2="12" y2="3"></line>
+                </svg>
+              </button>
+            )}
+
             <div className="upload-btn-wrapper">
               <button className="icon-btn" title="Tải file mới" onClick={() => setShowUploadModal(true)}>
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -465,7 +513,7 @@ const MobileLayout: React.FC<SharedLayoutProps> = ({
                         <EventIcon type={ev.event_type} />
                         {ev.event_number}
                       </td>
-                      <td>{Number(ev.distance_km) === 0 ? '' : Number(ev.distance_km).toFixed(3)}</td>
+                      <td>{Number(ev.distance_km) === 0 ? '0' : Number(ev.distance_km).toFixed(3)}</td>
                       <td className={ev.splice_loss_db > 0.5 ? 'red' : ''}>{Number(ev.splice_loss_db) === 0 ? '' : Number(ev.splice_loss_db).toFixed(3)}</td>
                       <td>{ev.reflectance_db == null || Number(ev.reflectance_db) === 0 ? '' : Number(ev.reflectance_db).toFixed(3)}</td>
                       <td>{Number(ev.slope_db_km) === 0 ? '' : Number(ev.slope_db_km).toFixed(3)}</td>

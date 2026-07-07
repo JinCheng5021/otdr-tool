@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import ReactECharts from 'echarts-for-react';
 import { SharedLayoutProps, Trace } from './types';
+import { exportToPdf } from './exportPdf';
 import './App.css';
 import './DesktopLayout.css';
 
@@ -35,6 +36,16 @@ const RestoreIcon: React.FC<{ size?: number }> = ({ size = 18 }) => (
     stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
     <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
     <path d="M3 3v5h5" />
+  </svg>
+);
+
+// ─── Download Icon SVG ─────────────────────────────────────────────────────────
+const DownloadIcon: React.FC<{ size?: number }> = ({ size = 18 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
+    stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+    <polyline points="7 10 12 15 17 10"></polyline>
+    <line x1="12" y1="15" x2="12" y2="3"></line>
   </svg>
 );
 
@@ -213,6 +224,16 @@ const DesktopLayout: React.FC<SharedLayoutProps> = ({
             symbolSize: [18, 65],
             label: { color: '#d62728' }
           },
+          tooltip: {
+            show: true,
+            showContent: true,
+            trigger: 'item',
+            triggerOn: 'click',
+            formatter: (params: any) => {
+              const spliceLoss = params.data.eventData.splice_loss_db || 0;
+              return `<b>${params.data.name}</b><br/>Distance: ${Number(params.data.coord[0]).toFixed(3)} km<br/>Splice Loss: ${Number(spliceLoss).toFixed(3)} dB`;
+            }
+          },
           data: markPoints
         }
       };
@@ -222,7 +243,8 @@ const DesktopLayout: React.FC<SharedLayoutProps> = ({
       grid: { top: 40, bottom: 30, left: 50, right: 30 },
       tooltip: {
         trigger: 'axis',
-        axisPointer: { type: 'cross' }
+        axisPointer: { type: 'cross' },
+        showContent: false
       },
       toolbox: {
         feature: {
@@ -237,8 +259,7 @@ const DesktopLayout: React.FC<SharedLayoutProps> = ({
             },
             iconStyle: { opacity: 0 },
             emphasis: { iconStyle: { opacity: 0 } }
-          },
-          saveAsImage: {}
+          }
         },
         right: 20,
         top: 0
@@ -255,6 +276,8 @@ const DesktopLayout: React.FC<SharedLayoutProps> = ({
 
   const onChartEvents = {
     click: (params: any) => {
+      const echartInstance = echartsRef.current?.getEchartsInstance();
+
       if (params.componentType === 'markPoint') {
         setSelectedEvent({
           name: params.data.name,
@@ -268,6 +291,22 @@ const DesktopLayout: React.FC<SharedLayoutProps> = ({
         });
       } else {
         setSelectedEvent(null);
+        if (echartInstance) {
+          echartInstance.dispatchAction({
+            type: 'hideTip'
+          });
+        }
+      }
+    },
+    'zr:click': (params: any) => {
+      if (!params.target) {
+        setSelectedEvent(null);
+        const echartInstance = echartsRef.current?.getEchartsInstance();
+        if (echartInstance) {
+          echartInstance.dispatchAction({
+            type: 'hideTip'
+          });
+        }
       }
     }
   };
@@ -388,6 +427,15 @@ const DesktopLayout: React.FC<SharedLayoutProps> = ({
               >
                 <RestoreIcon />
               </button>
+              <button
+                className="chart-tool-btn"
+                onClick={() => {
+                  if (currentApiData) exportToPdf(currentApiData, getChartOptions(), currentApiData.filename);
+                }}
+                title="Xuất báo cáo PDF"
+              >
+                <DownloadIcon />
+              </button>
             </div>
 
             <ReactECharts
@@ -430,7 +478,7 @@ const DesktopLayout: React.FC<SharedLayoutProps> = ({
                       <EventIcon type={ev.event_type} />
                       {ev.event_number}
                     </td>
-                    <td>{Number(ev.distance_km) === 0 ? '' : Number(ev.distance_km).toFixed(3)}</td>
+                    <td>{Number(ev.distance_km) === 0 ? '0' : Number(ev.distance_km).toFixed(3)}</td>
                     <td className={ev.splice_loss_db > 0.5 ? 'red' : ''}>{Number(ev.splice_loss_db) === 0 ? '' : Number(ev.splice_loss_db).toFixed(3)}</td>
                     <td>{ev.reflectance_db == null || Number(ev.reflectance_db) === 0 ? '' : Number(ev.reflectance_db).toFixed(3)}</td>
                     <td>{Number(ev.slope_db_km) === 0 ? '' : Number(ev.slope_db_km).toFixed(3)}</td>
