@@ -47,6 +47,12 @@ class BaseOTDRParser(ABC):
         # BẢNG TRA CỨU HỆ SỐ SUY HAO DANH ĐỊNH ĐỘNG THEO BƯỚC SÓNG VẬT LÝ
         # ---------------------------------------------------------------------
         wavelength = float(fxd_params.get('wavelength', 1550.0))
+        if wavelength == 155.0:
+            wavelength = 1550.0
+        elif wavelength == 131.0:
+            wavelength = 1310.0
+        elif wavelength == 162.5:
+            wavelength = 1625.0
         
         def get_fallback_slope(wl: float) -> float:
             wl_int = int(wl)
@@ -382,6 +388,8 @@ async def upload_otdr(files: List[UploadFile] = File(...)):
     results = []
     for file in files:
         file_bytes = await file.read()
+        file_bytes = file_bytes.replace(b'FFFFFLS', b'F9999LS')
+        file_bytes = file_bytes.replace(b'FFFFF2P', b'F99992P')
         parser = OTDRParserFactory.get_parser(file.filename)
         parsed_traces = parser.parse_to_standard_format(file_bytes)
         
