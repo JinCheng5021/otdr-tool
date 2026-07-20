@@ -35,6 +35,7 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 60vw;
+  margin-left: 40px; /* Thêm margin để tránh bị nút Back đè lên */
 }
 
 .file-dropdown {
@@ -162,7 +163,7 @@
   position: relative;
   background-color: #fff;
   border-bottom: 1px solid #eee;
-  touch-action: none;
+  touch-action: pan-y; /* Cho phép vuốt dọc để cuộn trang trên mobile */
 }
 .chart-tools {
   position: absolute;
