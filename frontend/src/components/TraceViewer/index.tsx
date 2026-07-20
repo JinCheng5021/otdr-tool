@@ -160,7 +160,7 @@ const TraceViewer: React.FC = () => {
       formData.append('stv_total_core', stvTotalCore);
       formData.append('stv_used_core', stvUsedCore);
 
-      const response = await fetch('http://localhost:8000/trace/convert', {
+      const response = await fetch('/trace/convert', {
         method: 'POST',
         body: formData,
       });

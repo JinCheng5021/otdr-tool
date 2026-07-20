@@ -34,7 +34,7 @@ const CurrentApp: React.FC = () => {
     setSelectedEvent(null);
     
     // Updated route to point to /current API
-    const apiUrl = 'http://localhost:8000/current/api/upload-otdr';
+    const apiUrl = '/current/api/upload-otdr';
     let totalItems = apiDataList.length;
 
     try {
