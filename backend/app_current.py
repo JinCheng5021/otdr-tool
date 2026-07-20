@@ -7,6 +7,7 @@ from typing import List
 import io
 import struct
 import zlib
+import math
 import otdrparser
 
 app = FastAPI(title="Factory OTDR Core Parser")
@@ -354,7 +355,7 @@ class MSORParser(BaseOTDRParser):
 class TRCParser(BaseOTDRParser):
     """
     Bộ parse chuyên xử lý định dạng .trc độc quyền của hãng EXFO.
-    Sử dụng giải thuật dựng bộ nhớ ảo liên tục và giải mã cây Registry AppReg.
+    Hỗ trợ cả chuẩn cũ (1 AppReg header) và chuẩn mới (nhiều section AppReg, cấu trúc thư mục).
     """
     def parse_to_standard_format(self, file_bytes: bytes) -> list:
         if not file_bytes.startswith(b'AppReg Format Ex'):
@@ -366,71 +367,101 @@ class TRCParser(BaseOTDRParser):
         # =====================================================================
         # BƯỚC 1: DỰNG BỘ NHỚ ẢO LIÊN TỤC (VIRTUAL MEMORY CONCATENATION)
         # =====================================================================
-        virtual_mem = bytearray()
-        blocks = []
+        sections = []
+        blocks = []  # Fallback for old format
+        offset = 0
         
-        try:
-            # Giải nén Block 1 (Registry Header & Metadata)
-            b1_size = struct.unpack('<I', file_bytes[36:40])[0]
-            b1_raw = file_bytes[40:40+b1_size]
-            block1_data = zlib.decompress(b1_raw)
-            virtual_mem.extend(block1_data)
-            blocks.append(block1_data)
-            
-            # Giải nén tuần tự các Block tiếp theo (DataPts, Event Table)
-            offset = 40 + b1_size
-            while offset < len(file_bytes):
-                if offset + 4 > len(file_bytes): 
-                    break
+        while offset < len(file_bytes):
+            if offset + 40 > len(file_bytes):
+                break
+                
+            if file_bytes[offset:offset+16] == b'AppReg Format Ex':
+                b_size = struct.unpack('<I', file_bytes[offset+36:offset+40])[0]
+                offset += 40
+                sections.append(bytearray())
+            else:
                 b_size = struct.unpack('<I', file_bytes[offset:offset+4])[0]
                 offset += 4
-                if offset + b_size > len(file_bytes): 
-                    break
-                b_raw = file_bytes[offset:offset+b_size]
+                
+            if offset + b_size > len(file_bytes):
+                break
+                
+            b_raw = file_bytes[offset:offset+b_size]
+            try:
                 block_data = zlib.decompress(b_raw)
-                virtual_mem.extend(block_data)
-                blocks.append(block_data)
-                offset += b_size
-        except Exception as e:
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Thất bại khi giải nén cấu trúc nhị phân .trc: {str(e)}"
-            )
+                sections[-1].extend(block_data)
+                blocks.append(block_data)  # Legacy support
+            except Exception as e:
+                pass
             
-        if len(blocks) < 3:
+            offset += b_size
+            
+        if not sections:
             raise HTTPException(
                 status_code=400, 
                 detail="Cấu trúc file .trc bị khuyết thiếu phân đoạn dữ liệu cốt lõi."
             )
-            
-        block1_data, block2_data, block3_data = blocks[0], blocks[1], blocks[2]
+
+        virtual_mem = sections[-1]
+        block2_data = blocks[1] if len(blocks) > 1 else b''
 
         # =====================================================================
         # BỘ TRỢ GIÚP ĐỌC VALUE TỪ CON TRỎ BỘ NHỚ ẢO (VIRTUAL REGISTRY READER)
         # =====================================================================
+        def _get_node(hdr_off: int) -> any:
+            if hdr_off + 16 > len(virtual_mem): return None
+            n_off, v_type, length, val_off = struct.unpack('<IIII', virtual_mem[hdr_off:hdr_off+16])
+            if n_off != hdr_off + 16: return None
+            
+            if val_off + length > len(virtual_mem): return None
+            val_bytes = virtual_mem[val_off:val_off+length]
+            
+            if v_type == 1: 
+                if length >= 4: return struct.unpack('<i', val_bytes[:4])[0]
+            elif v_type == 2: 
+                if length == 4: return struct.unpack('<f', val_bytes[:4])[0]
+                return val_bytes 
+            elif v_type == 3: 
+                if length >= 8: return struct.unpack('<d', val_bytes[:8])[0]
+            elif v_type == 4: 
+                return val_bytes.decode('utf-16-le', errors='ignore').strip('\x00')
+            elif v_type == 0: 
+                children = {}
+                for i in range(0, length, 4):
+                    child_off = struct.unpack('<I', val_bytes[i:i+4])[0]
+                    if child_off + 16 <= len(virtual_mem):
+                        c_n_off = struct.unpack('<I', virtual_mem[child_off:child_off+4])[0]
+                        if c_n_off == child_off + 16:
+                            name_end = virtual_mem.find(b'\x00', c_n_off)
+                            if name_end != -1:
+                                c_name = virtual_mem[c_n_off:name_end].decode('ascii', errors='ignore')
+                                children[c_name] = _get_node(child_off)
+                return children
+            return val_bytes
+
         def _read_virtual_registry(key_name: str, start_search: int = 0, end_search: int = None) -> any:
             is_utf16 = False
-            # Thử tìm kiếm key dạng ASCII trước (phiên bản s4.trc mới/khác)
             key_bytes = key_name.encode('ascii')
-            pos = virtual_mem.find(key_bytes, start_search, end_search)
+            pos = virtual_mem.find(key_bytes + b'\x00', start_search, end_search)
             
             if pos == -1:
-                # Fallback chuẩn cũ (utf-16-le)
-                key_bytes = key_name.encode('utf-16-le')
                 pos = virtual_mem.find(key_bytes, start_search, end_search)
-                is_utf16 = True
-                
-            if pos == -1:
-                return None
-                
-            # Nhảy qua tên Khóa và ký tự kết thúc chuỗi Null
+                if pos == -1:
+                    key_bytes = key_name.encode('utf-16-le')
+                    pos = virtual_mem.find(key_bytes, start_search, end_search)
+                    is_utf16 = True
+                    
+            if pos == -1: return None
+
+            if not is_utf16 and pos >= 16:
+                n_off = struct.unpack('<I', virtual_mem[pos-16:pos-12])[0]
+                if n_off == pos:
+                    return _get_node(pos - 16)
+
             pos += len(key_bytes)
             while pos < len(virtual_mem) and virtual_mem[pos] == 0:
                 pos += 1
                 
-            # Đọc cấu trúc Node Header:
-            # - Bản utf-16 cũ: Flag(2B) + Type(4B) + Length(4B) + Offset(4B) -> Tổng 14 bytes
-            # - Bản ascii mới: Flag(4B) + Type(4B) + Length(4B) + Offset(4B) -> Tổng 16 bytes
             if is_utf16:
                 if pos + 14 > len(virtual_mem): return None
                 v_type = struct.unpack('<I', virtual_mem[pos+2:pos+6])[0]
@@ -442,29 +473,26 @@ class TRCParser(BaseOTDRParser):
                 length = struct.unpack('<I', virtual_mem[pos+8:pos+12])[0]
                 v_offset = struct.unpack('<I', virtual_mem[pos+12:pos+16])[0]
             
-            if v_offset + length > len(virtual_mem):
-                return None
-                
+            if v_offset + length > len(virtual_mem): return None
             val_bytes = virtual_mem[v_offset : v_offset + length]
             
-            if v_type == 3:  # Double (64-bit float)
-                return struct.unpack('<d', val_bytes[:8])[0]
-            elif v_type == 2:  # Float (32-bit float)
-                return struct.unpack('<f', val_bytes[:4])[0]
-            elif v_type == 1:  # Integer (32-bit int)
-                if length >= 4: return struct.unpack('<i', val_bytes[:4])[0]
-                return None
+            if v_type == 3: 
+                if length == 8: return struct.unpack('<d', val_bytes[:8])[0]
+                return val_bytes
+            elif v_type == 2: 
+                if length == 4: return struct.unpack('<f', val_bytes[:4])[0]
+                return val_bytes
+            elif v_type == 1:
+                if length == 4: return struct.unpack('<i', val_bytes[:4])[0]
+                return val_bytes
             else:
-                # Fallback giải mã chuỗi ký tự hoặc số nguyên
                 try:
-                    if is_utf16:
-                        return val_bytes.decode('utf-16-le').strip('\x00')
+                    if is_utf16: return val_bytes.decode('utf-16-le').strip('\x00')
                     else:
                         try: return val_bytes.decode('utf-16-le').strip('\x00')
                         except Exception: return val_bytes.decode('ascii').strip('\x00')
                 except Exception:
-                    if len(val_bytes) >= 4:
-                        return struct.unpack('<i', val_bytes[:4])[0]
+                    if len(val_bytes) >= 4: return struct.unpack('<i', val_bytes[:4])[0]
             return None
 
         # =====================================================================
@@ -472,14 +500,13 @@ class TRCParser(BaseOTDRParser):
         # =====================================================================
         wavelength_raw = _read_virtual_registry("NominalWavelength")
         if wavelength_raw is None:
-            wavelength_raw = _read_virtual_registry("Pulse")  # Trong chuẩn ASCII, Pulse lưu Wavelength (đơn vị m)
+            wavelength_raw = _read_virtual_registry("Pulse")
             
         if wavelength_raw is not None:
             try:
                 val = float(wavelength_raw)
                 if val < 1e-4: wavelength_raw = val * 1e9
-            except Exception:
-                pass
+            except Exception: pass
         
         wavelength = float(wavelength_raw) if wavelength_raw else 1550.0
         if wavelength == 155.0: wavelength = 1550.0
@@ -487,45 +514,38 @@ class TRCParser(BaseOTDRParser):
 
         pulse_width = _read_virtual_registry("PulseWidth")
         if pulse_width is None:
-            pulse_width_raw = _read_virtual_registry("Range") # Trong chuẩn ASCII, Range lưu Pulse Width (đơn vị s)
-            if pulse_width_raw is not None:
-                pulse_width = pulse_width_raw
+            pulse_width_raw = _read_virtual_registry("Range")
+            if pulse_width_raw is not None: pulse_width = pulse_width_raw
                 
         if pulse_width is not None:
             try:
                 val = float(pulse_width)
-                if val < 1e-4: pulse_width = val * 1e9 # Đổi ra ns
-            except Exception:
-                pass
+                if val < 1e-4: pulse_width = val * 1e9
+            except Exception: pass
         pulse_width = pulse_width or 0
         
         ior = _read_virtual_registry("IndexOfRefraction")
-        if ior is None:
-            ior = _read_virtual_registry("HelixFactor") # Trong chuẩn ASCII, HelixFactor lưu IOR
+        if ior is None: ior = _read_virtual_registry("HelixFactor")
         ior = ior or 1.4682
         
         fiber_length = _read_virtual_registry("FiberLength")
-        if fiber_length is None:
-            fiber_length = _read_virtual_registry("RangeEnd") # Fallback chuẩn mới
+        if fiber_length is None: 
+            fiber_length = _read_virtual_registry("RangeEnd")
+            if fiber_length is not None and fiber_length < 1.0:
+                fiber_length = (299792.458 * fiber_length) / (2 * ior)
         fiber_length = fiber_length or 0.0
         
-        # Nhận diện đơn vị khoảng cách của EXFO (Meters vs Kilometers)
         is_unit_km = (fiber_length < 1000.0)
         actual_fiber_length = fiber_length * 1000.0 if is_unit_km else fiber_length
 
-        meas_date = _read_virtual_registry("Trace0") or _read_virtual_registry("Date") or _read_virtual_registry("AcquisitionDate") or ""
-        # Clean up measurement date if it has garbage
-        if isinstance(meas_date, str) and not meas_date.isprintable():
-            meas_date = ""
-
-        metadata = {
-            "wavelength": f"{round(wavelength, 1)} nm",
-            "pulse_width": f"{round(pulse_width, 1)} ns",
-            "index_of_refraction": round(ior, 5),
-            "number_of_data_points": len(block2_data) // 2,
-            "measurement_date": meas_date[:19].replace("T", " ") if meas_date else "",
-            "machine_type": "EXFO FastReporter Trace"
-        }
+        meas_date = _read_virtual_registry("Date") or _read_virtual_registry("AcquisitionDate") or ""
+        if isinstance(meas_date, dict): meas_date = ""
+        if not isinstance(meas_date, str):
+            meas_date_val = _read_virtual_registry("Trace0")
+            if isinstance(meas_date_val, str): meas_date = meas_date_val
+            else: meas_date = ""
+            
+        if isinstance(meas_date, str) and not meas_date.isprintable(): meas_date = ""
 
         # =====================================================================
         # BƯỚC 3: TRÍCH XUẤT ĐỒ THỊ BIỂU ĐỒ CHUẨN HÓA (CHART DATA)
@@ -536,20 +556,32 @@ class TRCParser(BaseOTDRParser):
 
         y_multiplier = 120.0 / scale_factor if scale_factor else 4.18
 
+        raw_samples = _read_virtual_registry("RawSamples")
+        is_raw_samples = False
+        if raw_samples is not None and isinstance(raw_samples, (bytes, bytearray)):
+            data_bytes = raw_samples
+            is_raw_samples = True
+        else:
+            data_bytes = block2_data
+
         raw_points = []
         raw_y_0 = None
-        for i in range(0, len(block2_data), 2):
-            if i + 2 > len(block2_data): 
-                break
-            # Dữ liệu đồ thị lưu dạng Big-Endian 16-bit Integer biểu thị milli-dB
-            val_milli_db = struct.unpack('>H', block2_data[i:i+2])[0]
-            raw_y = val_milli_db / 1000.0
+        for i in range(0, len(data_bytes), 2):
+            if i + 2 > len(data_bytes): break
             
-            if raw_y_0 is None:
-                raw_y_0 = raw_y
+            if is_raw_samples:
+                # Chuẩn EXFO AppReg Format Ex: Little-Endian, giá trị = val / ScaleFactor
+                val = struct.unpack('<H', data_bytes[i:i+2])[0]
+                y_corrected = val / scale_factor if scale_factor else val / 1024.0
+            else:
+                # Chuẩn cũ: Big-Endian, tương đối so với điểm đầu
+                val_milli_db = struct.unpack('>H', data_bytes[i:i+2])[0]
+                raw_y = val_milli_db / 1000.0
                 
-            # Khôi phục theo hệ quy chiếu DisplayRange và ScaleFactor
-            y_corrected = display_range - (raw_y_0 - raw_y) * y_multiplier
+                if raw_y_0 is None: raw_y_0 = raw_y
+                    
+                y_corrected = display_range - (raw_y_0 - raw_y) * y_multiplier
+            
             raw_points.append(y_corrected)
             
         if acq_offset is not None and acq_offset > 0:
@@ -559,63 +591,119 @@ class TRCParser(BaseOTDRParser):
             
         chart_data = [[float(i * spacing) / 1000.0, float(db)] for i, db in enumerate(raw_points)]
 
+        machine_type_raw = _read_virtual_registry("ModelName")
+        if isinstance(machine_type_raw, (bytes, bytearray)):
+            try:
+                machine_type = machine_type_raw.decode('utf-8', errors='ignore')
+            except Exception:
+                machine_type = "EXFO TRC Trace"
+        elif isinstance(machine_type_raw, str):
+            machine_type = machine_type_raw
+        else:
+            machine_type = "EXFO TRC Trace"
+
+        metadata = {
+            "wavelength": f"{round(wavelength, 1)} nm",
+            "pulse_width": f"{round(pulse_width, 1)} ns",
+            "index_of_refraction": round(ior, 5),
+            "number_of_data_points": len(raw_points),
+            "measurement_date": meas_date[:19].replace("T", " ") if meas_date else "",
+            "machine_type": machine_type
+        }
+
         # =====================================================================
         # BƯỚC 4: TÁI CẤU TRÚC BẢNG SỰ KIỆN (EVENT TABLE RECONSTRUCTION)
         # =====================================================================
-        events = []
-        event_positions = []
-        cumulative_distance_km = 0.0
+        extracted_events_data = []
+        event1_node = _read_virtual_registry("Event1")
         
-        # Quét tìm tọa độ bắt đầu của các mốc Event lẻ (Event1, Event3, Event5...)
-        idx = 1
-        while True:
-            key_name = f"Event{idx}"
-            # Thử ascii trước, nếu không được mới thử utf-16-le
-            key_bytes = key_name.encode('ascii')
-            pos = virtual_mem.find(key_bytes)
-            if pos == -1:
-                key_bytes = key_name.encode('utf-16-le')
-                pos = virtual_mem.find(key_bytes)
+        if isinstance(event1_node, dict):
+            # NEW FORMAT
+            idx = 1
+            while True:
+                ev_section = _read_virtual_registry(f"Event{idx}")
+                if not ev_section or not isinstance(ev_section, dict): break
+                ev_splice = _read_virtual_registry(f"Event{idx+1}")
+                if ev_splice and not isinstance(ev_splice, dict): ev_splice = None
                 
-            if pos == -1:
-                break
-            event_positions.append((idx, pos))
-            idx += 2
+                sec_len = ev_section.get("Length", 0.0)
+                sec_len_km = sec_len / 1000.0 if sec_len else 0.0
+                sec_loss = ev_section.get("Loss", 0.0)
+                
+                sp_pos = ev_splice.get("Position", 0.0) if ev_splice else 0.0
+                sp_pos_km = sp_pos / 1000.0 if sp_pos else 0.0
+                sp_loss = ev_splice.get("Loss", 0.0) if ev_splice else 0.0
+                if sp_loss is not None and math.isnan(sp_loss): sp_loss = None
+                refl = ev_splice.get("Reflectance", None) if ev_splice else None
+                
+                if refl is not None and (math.isnan(refl) or refl == 0.0 or refl < -100.0 or refl > 0.0):
+                    refl = None
+                    
+                extracted_events_data.append({
+                    "section_len_km": sec_len_km,
+                    "section_loss": sec_loss,
+                    "next_event_pos": sp_pos_km,
+                    "next_event_loss": sp_loss,
+                    "next_event_refl": refl,
+                    "has_next": ev_splice is not None
+                })
+                idx += 2
+        else:
+            # OLD FORMAT
+            event_positions = []
+            idx = 1
+            while True:
+                key_name = f"Event{idx}"
+                key_bytes = key_name.encode('ascii')
+                pos = virtual_mem.find(key_bytes)
+                if pos == -1:
+                    key_bytes = key_name.encode('utf-16-le')
+                    pos = virtual_mem.find(key_bytes)
+                if pos == -1: break
+                event_positions.append((idx, pos))
+                idx += 2
+                
+            event_positions.sort(key=lambda x: x[1])
+            event_positions.append((9999, len(virtual_mem)))
             
-        event_positions.sort(key=lambda x: x[1])
-        # Chèn mốc ảo chặn cuối để giới hạn phạm vi tìm kiếm của sự kiện cuối cùng
-        event_positions.append((9999, len(virtual_mem)))
-        
+            for i in range(len(event_positions) - 1):
+                ev_idx, start_pos = event_positions[i]
+                _, next_start_pos = event_positions[i+1]
+                
+                def _find_all(key: str):
+                    results = []
+                    p = start_pos
+                    while p < next_start_pos:
+                        p = virtual_mem.find(key.encode('ascii'), p, next_start_pos)
+                        if p == -1: break
+                        v = _read_virtual_registry(key, p, next_start_pos)
+                        if v is not None: results.append(v)
+                        p += len(key)
+                    return results
+
+                positions = _find_all("Position")
+                lengths = _find_all("Length")
+                section_len = positions[0] if len(positions) > 0 else 0.0
+                section_loss = lengths[0] if len(lengths) > 0 else 0.0
+                next_event_loss = lengths[1] if len(lengths) > 1 else 0.0
+                next_event_pos = _read_virtual_registry("SubCursorB", start_pos, next_start_pos)
+                
+                extracted_events_data.append({
+                    "section_len_km": (section_len / 1000.0) if section_len else 0.0,
+                    "section_loss": section_loss,
+                    "next_event_pos": (next_event_pos / 1000.0) if next_event_pos else 0.0,
+                    "next_event_loss": next_event_loss,
+                    "next_event_refl": None,
+                    "has_next": next_event_pos is not None
+                })
+
+        events = []
         cumulative_loss_db = 0.0
-
-        for i in range(len(event_positions) - 1):
-            ev_idx, start_pos = event_positions[i]
-            _, next_start_pos = event_positions[i+1]
+        
+        for i, data in enumerate(extracted_events_data):
+            section_len_km = data["section_len_km"]
+            section_loss = data["section_loss"]
             
-            def _find_all(key: str):
-                results = []
-                p = start_pos
-                while p < next_start_pos:
-                    p = virtual_mem.find(key.encode('ascii'), p, next_start_pos)
-                    if p == -1: break
-                    v = _read_virtual_registry(key, p, next_start_pos)
-                    if v is not None: results.append(v)
-                    p += len(key)
-                return results
-
-            # Trích xuất dữ liệu gốc chuẩn xác từ khối sự kiện
-            positions = _find_all("Position")
-            lengths = _find_all("Length")
-            
-            section_len = positions[0] if len(positions) > 0 else 0.0
-            section_loss = lengths[0] if len(lengths) > 0 else 0.0
-            next_event_loss = lengths[1] if len(lengths) > 1 else 0.0
-            next_event_pos = _read_virtual_registry("SubCursorB", start_pos, next_start_pos)
-            
-            # EXFO positions are always in meters, divide by 1000 to get km
-            section_len_km = (section_len / 1000.0) if section_len else 0.0
-            
-            # Cập nhật section_loss cho Event trước đó (vì block hiện tại chứa section loss của đoạn bắt đầu từ event trước đó)
             if len(events) > 0:
                 slope = (section_loss / section_len_km) if section_len_km > 0 and section_loss else 0.200
                 if slope <= 0: slope = 0.200 if wavelength == 1550.0 else 0.350
@@ -623,48 +711,45 @@ class TRCParser(BaseOTDRParser):
                 events[-1]["section_loss_db"] = round(section_loss, 3) if section_loss is not None else None
                 if section_loss is not None:
                     cumulative_loss_db += section_loss
-
-            # Xử lý Event 1 (Launch Level / Start)
+                    
             if i == 0:
                 events.append({
                     "event_number": 1,
                     "distance_km": 0.0,
                     "splice_loss_db": None,
-                    "reflectance_db": -22.6,  # Fallback từ Ground Truth
-                    "slope_db_km": events[-1]["slope_db_km"] if len(events) > 0 else 0.0,
-                    "section_loss_db": events[-1]["section_loss_db"] if len(events) > 0 else 0.0,
+                    "reflectance_db": -22.6,
+                    "slope_db_km": 0.0,
+                    "section_loss_db": 0.0,
                     "cumulative_loss_db": 0.0,
                     "event_type": "start"
                 })
-                # Đã update section_loss cho Event 1 ở đầu vòng lặp i=0, vì mảng events ban đầu rỗng nên đoạn if len(events)>0 không chạy.
-                # Do đó cần gán cứng cho Event 1 ngay khi tạo:
                 slope = (section_loss / section_len_km) if section_len_km > 0 and section_loss else 0.200
+                if slope <= 0: slope = 0.200 if wavelength == 1550.0 else 0.350
                 events[0]["slope_db_km"] = round(slope, 3)
                 events[0]["section_loss_db"] = round(section_loss, 3) if section_loss is not None else None
-
-            # Thêm các Event trung gian và Event kết thúc tuyến
-            if next_event_pos is not None:
-                is_last = (i == len(event_positions) - 2)
+                if section_loss is not None:
+                    cumulative_loss_db += section_loss
+                    
+            if data["has_next"]:
+                is_last = (i == len(extracted_events_data) - 1)
                 event_type = "end" if is_last else "non-reflective"
+                if data["next_event_refl"] is not None:
+                    event_type = "reflective"
                 
                 events.append({
                     "event_number": len(events) + 1,
-                    "distance_km": round((next_event_pos / 1000.0) if next_event_pos else 0.0, 5),
-                    "splice_loss_db": round(next_event_loss, 3) if next_event_loss is not None else 0.0,
-                    "reflectance_db": None,
-                    "slope_db_km": 0.0, # Sẽ được update ở vòng lặp sau
-                    "section_loss_db": None, # Sẽ được update ở vòng lặp sau
-                    "cumulative_loss_db": round(cumulative_loss_db + (next_event_loss if next_event_loss else 0.0), 3),
+                    "distance_km": round(data["next_event_pos"], 5),
+                    "splice_loss_db": round(data["next_event_loss"], 3) if data["next_event_loss"] is not None else 0.0,
+                    "reflectance_db": round(data["next_event_refl"], 3) if data["next_event_refl"] is not None else None,
+                    "slope_db_km": 0.0,
+                    "section_loss_db": None,
+                    "cumulative_loss_db": round(cumulative_loss_db + (data["next_event_loss"] if data["next_event_loss"] else 0.0), 3),
                     "event_type": event_type
                 })
-                
-                if next_event_loss is not None:
-                    cumulative_loss_db += next_event_loss
+                if data["next_event_loss"] is not None:
+                    cumulative_loss_db += data["next_event_loss"]
 
-        # Cập nhật kết quả tổng kết chuẩn hóa vào Metadata
         metadata["fiber_length"] = actual_fiber_length
-        
-        # Nếu không có event nào, cố gắng lấy TotalLoss từ SpansLoss hoặc DisplayRange (phiên bản ascii)
         if len(events) == 0:
             total_loss_fallback = _read_virtual_registry("TotalLoss")
             if total_loss_fallback is None:
