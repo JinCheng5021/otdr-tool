@@ -8,7 +8,7 @@ const App: React.FC = () => {
 
   if (activeTab === 'current') {
     return (
-      <div className="w-screen h-screen overflow-hidden relative bg-surface">
+      <div className="w-screen h-screen overflow-y-auto relative bg-surface">
         <button 
           onClick={() => setActiveTab('traceviewer')}
           className="absolute top-4 left-4 z-[9999] bg-white/90 backdrop-blur p-2 rounded-full shadow-lg border border-outline-variant text-industrial-navy hover:scale-110 transition-transform flex items-center justify-center"
