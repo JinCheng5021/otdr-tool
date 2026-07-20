@@ -1,5 +1,4 @@
-import React, { useState, useRef, useCallback } from 'react';
-import JSZip from 'jszip';
+import React, { useState, useRef } from 'react';
 import Modals from './Modals';
 
 const TraceViewer: React.FC = () => {
@@ -16,7 +15,7 @@ const TraceViewer: React.FC = () => {
 
   // Modals state
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
-  
+
   // Basic Parameters
   const [threshold, setThreshold] = useState('0.10');
   const [sectionThreshold, setSectionThreshold] = useState('');
@@ -125,7 +124,7 @@ const TraceViewer: React.FC = () => {
     try {
       const formData = new FormData();
       files.forEach((file) => formData.append('files', file));
-      
+
       formData.append('threshold_db', threshold);
       formData.append('section_threshold_db', sectionThreshold);
       formData.append('duration_threshold_s', durationThreshold);
@@ -135,7 +134,7 @@ const TraceViewer: React.FC = () => {
       formData.append('graph_reach_tolerance_km', '0.030');
       formData.append('event_shortfall_tolerance_km', '0.500');
       formData.append('overlength_tolerance_km', '0.500');
-      
+
       formData.append('segment_start_km', segmentStart);
       formData.append('segment_end_km', segmentEnd);
       formData.append('section_export_scope', sectionExportScope);
@@ -146,14 +145,14 @@ const TraceViewer: React.FC = () => {
       formData.append('section_allow_split', sectionAllowSplit);
       formData.append('section_match_tolerance_m', sectionMatchTolerance);
       formData.append('section_measurement_mode', sectionMeasurementMode);
-      
+
       formData.append('orl_pass_threshold_db', orlPassThreshold);
       formData.append('orl_source_mode', orlSourceMode);
       formData.append('orl_missing_policy', orlMissingPolicy);
       formData.append('orl_allow_lower_bound', orlAllowLowerBound);
       formData.append('orl_lower_bound_status', orlLowerBoundStatus);
       formData.append('orl_physical_mode', orlPhysicalMode);
-      
+
       formData.append('output_mode', outputMode);
       formData.append('exporter_name', exportData.exporterName);
       formData.append('unit', exportData.exporterUnit);
@@ -169,24 +168,24 @@ const TraceViewer: React.FC = () => {
       if (!response.ok) {
         let errorMsg = 'Có lỗi xảy ra khi xử lý file.';
         try {
-            const errJson = await response.json();
-            errorMsg = errJson.detail || errorMsg;
-        } catch(e) {}
+          const errJson = await response.json();
+          errorMsg = errJson.detail || errorMsg;
+        } catch (e) { }
         throw new Error(errorMsg);
       }
 
       const contentType = response.headers.get('content-type');
       let filename = 'report.xlsx';
-      
+
       const contentDisposition = response.headers.get('content-disposition');
       if (contentDisposition && contentDisposition.indexOf('attachment') !== -1) {
-          const filenameRegex = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/;
-          const matches = filenameRegex.exec(contentDisposition);
-          if (matches != null && matches[1]) {
-              filename = matches[1].replace(/['"]/g, '');
-          }
+        const filenameRegex = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/;
+        const matches = filenameRegex.exec(contentDisposition);
+        if (matches != null && matches[1]) {
+          filename = matches[1].replace(/['"]/g, '');
+        }
       } else if (contentType === 'application/zip') {
-          filename = 'reports.zip';
+        filename = 'reports.zip';
       }
 
       const blob = await response.blob();
@@ -199,7 +198,7 @@ const TraceViewer: React.FC = () => {
       a.click();
       window.URL.revokeObjectURL(url);
       document.body.removeChild(a);
-      
+
       setStatus({ message: `Xuất thành công: ${filename}`, type: 'success' });
     } catch (err: any) {
       setStatus({ message: err.message, type: 'error' });
@@ -214,7 +213,7 @@ const TraceViewer: React.FC = () => {
       </section>
 
       <section className="opacity-0 animate-fade-up stagger-1" style={{ animationFillMode: 'forwards' }}>
-        <div 
+        <div
           className={`group relative w-full h-56 md:h-64 rounded-2xl border-2 border-dashed ${isDragging ? 'border-primary bg-primary/10' : 'border-primary/30 bg-surface-container-lowest'} hover:bg-primary/5 hover:border-primary transition-all flex flex-col items-center justify-center cursor-pointer overflow-hidden`}
           onDragOver={handleDragOver}
           onDragLeave={handleDragLeave}
@@ -234,7 +233,7 @@ const TraceViewer: React.FC = () => {
             <span className="px-3 py-1 rounded bg-white border border-outline-variant font-mono-data text-[11px] font-bold text-industrial-gray">.TRC</span>
           </div>
         </div>
-        
+
         {files.length > 0 && (
           <div className="mt-3 bg-white border border-outline-variant rounded-xl p-4 shadow-sm max-h-48 overflow-y-auto">
             <div className="flex justify-between items-center mb-2">
@@ -292,22 +291,22 @@ const TraceViewer: React.FC = () => {
       {/* Configuration Settings Panel */}
       <section className="glass-card rounded-2xl overflow-hidden flex flex-col opacity-0 animate-fade-up stagger-3 border border-outline-variant shadow-sm" style={{ animationFillMode: 'forwards' }}>
         <div className="flex bg-surface-container-high/30 px-4 pt-3 gap-1">
-          <button 
-            type="button" 
+          <button
+            type="button"
             onClick={() => setActiveTab('basic')}
             className={`px-6 py-3 text-[12px] font-bold tracking-widest rounded-t-lg transition-colors ${activeTab === 'basic' ? 'text-primary border-b-2 border-primary bg-white/50' : 'text-on-surface-variant hover:text-primary'}`}
           >
             THÔNG SỐ CƠ BẢN
           </button>
-          <button 
-            type="button" 
+          <button
+            type="button"
             onClick={() => setActiveTab('advanced')}
             className={`px-6 py-3 text-[12px] font-bold tracking-widest rounded-t-lg transition-colors ${activeTab === 'advanced' ? 'text-primary border-b-2 border-primary bg-white/50' : 'text-on-surface-variant hover:text-primary'}`}
           >
             THIẾT LẬP NÂNG CAO
           </button>
         </div>
-        
+
         <div className="p-8 flex flex-col gap-6 w-full">
           {/* QUICK PRESETS ROW */}
           <div className="flex flex-col gap-2">
@@ -406,12 +405,12 @@ const TraceViewer: React.FC = () => {
                 <div className="grid grid-cols-2 divide-x divide-outline-variant">
                   <div className="p-3 space-y-1.5">
                     <label className="text-[13px] font-bold text-industrial-navy uppercase tracking-wider block">Tổng core</label>
-                    <input value={stvTotalCore} onChange={(e) => setStvTotalCore(e.target.value)} className="w-full bg-white border border-outline-variant rounded-lg px-3 py-2.5 font-mono-data text-lg text-industrial-navy focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all outline-none placeholder:text-outline" type="number" min="1" step="1" placeholder="VD: 24"/>
+                    <input value={stvTotalCore} onChange={(e) => setStvTotalCore(e.target.value)} className="w-full bg-white border border-outline-variant rounded-lg px-3 py-2.5 font-mono-data text-lg text-industrial-navy focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all outline-none placeholder:text-outline" type="number" min="1" step="1" placeholder="VD: 24" />
                     <p className="text-[10px] text-on-surface-variant leading-tight">Tổng số core cáp. Để trống = tự tính theo số file.</p>
                   </div>
                   <div className="p-3 space-y-1.5">
                     <label className="text-[13px] font-bold text-industrial-navy uppercase tracking-wider block">Core sử dụng</label>
-                    <input value={stvUsedCore} onChange={(e) => setStvUsedCore(e.target.value)} className="w-full bg-white border border-outline-variant rounded-lg px-3 py-2.5 font-mono-data text-lg text-industrial-navy focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all outline-none placeholder:text-outline" type="number" min="0" step="1" placeholder="VD: 4"/>
+                    <input value={stvUsedCore} onChange={(e) => setStvUsedCore(e.target.value)} className="w-full bg-white border border-outline-variant rounded-lg px-3 py-2.5 font-mono-data text-lg text-industrial-navy focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all outline-none placeholder:text-outline" type="number" min="0" step="1" placeholder="VD: 4" />
                     <p className="text-[10px] text-on-surface-variant leading-tight">Core đang khai thác. Để trống = tự tính.</p>
                   </div>
                 </div>
@@ -553,7 +552,7 @@ const TraceViewer: React.FC = () => {
 
       {/* Action Area */}
       <section className="opacity-0 animate-fade-up stagger-4" style={{ animationFillMode: 'forwards' }}>
-        <button 
+        <button
           onClick={handleExportClick}
           className="group w-full h-20 bg-industrial-navy hover:bg-primary text-white rounded-2xl font-headline-md text-[20px] flex items-center justify-center gap-4 transition-all active:scale-[0.98] shadow-xl shadow-primary/20 btn-pro relative overflow-hidden"
         >
@@ -568,8 +567,8 @@ const TraceViewer: React.FC = () => {
         </div>
       </section>
 
-      <Modals 
-        isExportModalOpen={isExportModalOpen} 
+      <Modals
+        isExportModalOpen={isExportModalOpen}
         setIsExportModalOpen={setIsExportModalOpen}
         onConfirmExport={handleConfirmExport}
       />
