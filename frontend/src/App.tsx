@@ -1,160 +1,142 @@
-import React, { useState, useEffect, useRef } from 'react';
-import axios from 'axios';
-import MobileLayout from './MobileLayout';
-import DesktopLayout from './DesktopLayout';
-import { APIResponse } from './types';
-
-function useMediaQuery(query: string) {
-  const [matches, setMatches] = useState(false);
-
-  useEffect(() => {
-    const media = window.matchMedia(query);
-    if (media.matches !== matches) {
-      setMatches(media.matches);
-    }
-    const listener = () => setMatches(media.matches);
-    media.addEventListener('change', listener);
-    return () => media.removeEventListener('change', listener);
-  }, [matches, query]);
-
-  return matches;
-}
+import React, { useState } from 'react';
+import CurrentApp from './components/CurrentApp';
+import TraceViewer from './components/TraceViewer';
+import NotificationDropdown from './components/NotificationDropdown';
 
 const App: React.FC = () => {
-  // Coi màn hình lớn hơn 1024px là Desktop
-  const isDesktop = useMediaQuery('(min-width: 1024px)');
+  const [activeTab, setActiveTab] = useState<'current' | 'traceviewer'>('traceviewer');
 
-  const [apiDataList, setApiDataList] = useState<APIResponse[]>([]);
-  const [currentFileIndex, setCurrentFileIndex] = useState<number>(0);
-  const [loading, setLoading] = useState<boolean>(false);
-  const [selectedEvent, setSelectedEvent] = useState<any>(null);
+  if (activeTab === 'current') {
+    return (
+      <div className="w-screen h-screen overflow-hidden relative bg-surface">
+        <button 
+          onClick={() => setActiveTab('traceviewer')}
+          className="absolute top-4 left-4 z-[9999] bg-white/90 backdrop-blur p-2 rounded-full shadow-lg border border-outline-variant text-industrial-navy hover:scale-110 transition-transform flex items-center justify-center"
+          title="Trở về Menu"
+        >
+          <span className="material-symbols-outlined">arrow_back</span>
+        </button>
+        <CurrentApp />
+      </div>
+    );
+  }
 
-  const handleFiles = async (fileList: FileList) => {
-    if (!fileList || fileList.length === 0) return;
-    const files = Array.from(fileList);
-
-    setLoading(true);
-    setSelectedEvent(null);
-    
-    const apiUrl = '/api/upload-otdr';
-
-    let totalItems = apiDataList.length;
-
-    try {
-      for (let i = 0; i < files.length; i++) {
-        const formData = new FormData();
-        formData.append('files', files[i]);
-        
-        try {
-          const response = await axios.post<{ results: APIResponse[] }>(apiUrl, formData, {
-            headers: { 'Content-Type': 'multipart/form-data' }
-          });
-          
-          if (response.data.results && response.data.results.length > 0) {
-            const newResults = response.data.results;
-            setApiDataList(prev => [...prev, ...newResults]);
-            totalItems += newResults.length;
-            setCurrentFileIndex(totalItems - 1);
-          }
-        } catch (err: any) {
-          console.error(`Lỗi xử lý file ${files[i].name}:`, err);
-          alert(`Lỗi khi tải lên file ${files[i].name}: ${err.response?.data?.detail || err.message}`);
-        }
-      }
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
-    if (event.target.files) {
-      handleFiles(event.target.files);
-      event.target.value = '';
-    }
-  };
-
-  const handleDeleteCurrentFile = () => {
-    setApiDataList(prev => {
-      const newList = prev.filter((_, idx) => idx !== currentFileIndex);
-      if (newList.length === 0) {
-        setCurrentFileIndex(0);
-      } else if (currentFileIndex >= newList.length) {
-        setCurrentFileIndex(newList.length - 1);
-      }
-      return newList;
-    });
-  };
-
-  const dragCounter = useRef(0);
-  const [isDraggingGlobal, setIsDraggingGlobal] = useState(false);
-
-  const handleDragEnter = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    dragCounter.current += 1;
-    if (e.dataTransfer.items && e.dataTransfer.items.length > 0) {
-      setIsDraggingGlobal(true);
-    }
-  };
-
-  const handleDragLeave = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    dragCounter.current -= 1;
-    if (dragCounter.current === 0) {
-      setIsDraggingGlobal(false);
-    }
-  };
-
-  const handleDragOver = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-  };
-
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDraggingGlobal(false);
-    dragCounter.current = 0;
-    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      handleFiles(e.dataTransfer.files);
-    }
-  };
-
-  const sharedProps = {
-    apiDataList,
-    currentFileIndex,
-    loading,
-    selectedEvent,
-    handleFiles,
-    handleFileUpload,
-    handleDeleteCurrentFile,
-    setCurrentFileIndex,
-    setSelectedEvent,
-  };
-
+  // Khi xuống đến đây, TypeScript hiểu ngầm activeTab CHẮC CHẮN là 'traceviewer'
+  // Do đó Sidebar chỉ hiển thị trạng thái traceviewer đang active.
   return (
-    <div
-      className="app-container"
-      onDragEnter={handleDragEnter}
-      onDragOver={handleDragOver}
-      onDragLeave={handleDragLeave}
-      onDrop={handleDrop}
-    >
-      {isDraggingGlobal && (
-        <div className="global-drag-overlay">
-          <div className="global-drag-overlay-content">
-            <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-              <polyline points="17 8 12 3 7 8"></polyline>
-              <line x1="12" y1="3" x2="12" y2="15"></line>
-            </svg>
-            <h2>Kéo thả file vào đây</h2>
-            <p>Hỗ trợ định dạng .sor, .msor, .trc</p>
+    <div className="antialiased min-h-screen flex flex-col bg-surface text-on-background font-body-lg selection:bg-primary-fixed selection:text-on-primary-fixed">
+      {/* TopAppBar */}
+      <header className="bg-surface/80 backdrop-blur-md border-b border-outline-variant z-50 sticky top-0 px-margin-mobile md:px-margin-desktop w-full h-14 flex justify-between items-center">
+        <div className="flex items-center gap-2">
+          <div className="w-8 h-8 bg-primary rounded flex items-center justify-center text-on-primary">
+            <span className="material-symbols-outlined text-[20px]">analytics</span>
           </div>
+          <span className="font-headline-md text-[18px] font-extrabold tracking-tight text-industrial-navy">FPT OTDR PRO</span>
         </div>
-      )}
-      {isDesktop ? <DesktopLayout {...sharedProps} /> : <MobileLayout {...sharedProps} />}
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 text-status-pass bg-status-pass/10 px-3 py-1 rounded-full border border-status-pass/20 animate-pulse-soft">
+            <div className="w-2 h-2 rounded-full bg-status-pass"></div>
+            <span className="text-[10px] font-bold uppercase tracking-widest">System Ready</span>
+          </div>
+          <NotificationDropdown />
+        </div>
+      </header>
+
+      {/* Main Canvas */}
+      <main className="flex-1 flex flex-col md:flex-row w-full max-w-[1400px] mx-auto relative overflow-hidden">
+        {/* NavigationDrawer (Desktop Only) */}
+        <aside className="hidden md:flex flex-col gap-4 p-6 bg-surface-container-low border-r border-outline-variant w-[280px] sticky top-14 h-[calc(100vh-56px)] shrink-0">
+          <div className="flex flex-col gap-1">
+            <button className="flex items-center gap-3 px-4 py-2.5 rounded-lg bg-primary text-white shadow-lg shadow-primary/20 btn-pro font-semibold">
+              <span className="material-symbols-outlined text-[20px]">upload</span>
+              <span className="text-sm">Nạp Trace Mới</span>
+            </button>
+            <div className="h-px bg-outline-variant my-4"></div>
+            <nav className="flex flex-col gap-1">
+              <button 
+                onClick={() => setActiveTab('current')} 
+                className="flex items-center gap-3 px-3 py-2 text-left rounded-lg transition-colors font-medium text-on-surface-variant hover:bg-surface-variant"
+              >
+                <span className="material-symbols-outlined text-[20px]">show_chart</span>
+                <span className="text-sm">Đồ thị tuyến</span>
+              </button>
+              
+              <button 
+                onClick={() => setActiveTab('traceviewer')} 
+                className="flex items-center gap-3 px-3 py-2 text-left rounded-lg transition-colors font-medium text-primary bg-primary-fixed/50 font-bold border border-primary/10"
+              >
+                <span className="material-symbols-outlined text-[20px]">tune</span>
+                <span className="text-sm">Cấu hình thông số</span>
+              </button>
+              
+              <button 
+                onClick={() => window.dispatchEvent(new Event('open-history-modal'))}
+                className="flex items-center gap-3 px-3 py-2 text-left rounded-lg text-on-surface-variant hover:bg-surface-variant transition-colors font-medium"
+              >
+                <span className="material-symbols-outlined text-[20px]">history</span>
+                <span className="text-sm">Lịch sử xuất file</span>
+              </button>
+              <button className="flex items-center gap-3 px-3 py-2 text-left rounded-lg text-on-surface-variant hover:bg-surface-variant transition-colors font-medium">
+                <span className="material-symbols-outlined text-[20px]">settings</span>
+                <span className="text-sm">Tùy chọn hệ thống</span>
+              </button>
+            </nav>
+          </div>
+          
+          <div className="mt-auto bg-surface-container-high/50 p-4 rounded-xl border border-outline-variant">
+            <div className="flex items-center gap-2 mb-3">
+              <span className="material-symbols-outlined text-[18px] text-industrial-navy">info</span>
+              <span className="text-[11px] font-bold text-on-surface-variant tracking-wider uppercase">Thống kê phiên</span>
+            </div>
+            <ul className="space-y-3">
+              <li className="flex justify-between items-center">
+                <span className="text-xs text-on-surface-variant">Trace nạp:</span>
+                <span className="font-mono-data text-sm font-bold text-primary">00</span>
+              </li>
+              <li className="flex justify-between items-center">
+                <span className="text-xs text-on-surface-variant">Lỗi nhận diện:</span>
+                <span className="font-mono-data text-sm font-bold text-error">00</span>
+              </li>
+              <li className="flex justify-between items-center">
+                <span className="text-xs text-on-surface-variant">Phiên bản:</span>
+                <span className="font-mono-data text-xs text-on-surface-variant">v2.1.4</span>
+              </li>
+            </ul>
+          </div>
+        </aside>
+
+        {/* Center Visualization & Configuration Area */}
+        <div className="flex-1 flex flex-col min-w-0 h-[calc(100vh-56px)] overflow-y-auto">
+          <TraceViewer />
+        </div>
+      </main>
+
+      {/* BottomNavBar (Mobile Only) */}
+      <nav className="fixed bottom-0 w-full flex justify-around items-center h-16 bg-white/90 backdrop-blur-md z-50 md:hidden border-t border-outline-variant px-4">
+        <button 
+          onClick={() => setActiveTab('traceviewer')}
+          className="flex flex-col items-center justify-center px-4 text-primary"
+        >
+          <span className="material-symbols-outlined text-[24px]">tune</span>
+          <span className="text-[10px] font-bold uppercase mt-1">Cấu hình</span>
+        </button>
+        <button 
+          onClick={() => setActiveTab('current')}
+          className="flex flex-col items-center justify-center px-4 text-on-surface-variant opacity-50"
+        >
+          <span className="material-symbols-outlined text-[24px]">show_chart</span>
+          <span className="text-[10px] font-bold uppercase mt-1">Đồ thị</span>
+        </button>
+        <button 
+          onClick={() => window.dispatchEvent(new Event('open-history-modal'))}
+          className="flex flex-col items-center justify-center px-4 text-on-surface-variant opacity-50"
+        >
+          <span className="material-symbols-outlined text-[24px]">history</span>
+          <span className="text-[10px] font-bold uppercase mt-1">Lịch sử</span>
+        </button>
+      </nav>
+      {/* Mobile Nav Spacing */}
+      <div className="h-16 md:hidden"></div>
     </div>
   );
 };
