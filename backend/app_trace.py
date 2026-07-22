@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from datetime import datetime
 import hashlib
+import io
 import json
 import time
 import sqlite3
 import os
+from uuid import UUID, uuid4
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, Response
@@ -14,6 +16,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import List
 
 from .msor_converter import build_workbook_from_uploads
+from .blob_storage import (
+    DEFAULT_MAX_DOWNLOAD_BYTES,
+    BlobStorageConfigurationError,
+    BlobStorageError,
+    BlobStorageNotFoundError,
+    BlobStorageOperationError,
+    BlobStorageSizeError,
+    PrivateBlobStorage,
+    build_input_path,
+    build_output_path,
+    job_id_from_input_path,
+)
 
 DB_FILE = "/tmp/export_history.db" if os.environ.get("VERCEL") else "export_history.db"
 
@@ -49,6 +63,7 @@ app.add_middleware(
 )
 
 ALLOWED_EXTENSIONS = ['.msor', '.sor', '.trc']
+XLSX_CONTENT_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 HTML_PAGE = """<!DOCTYPE html>
 
 <html class="light" lang="en"><head>
@@ -1358,6 +1373,18 @@ HTML_PAGE = """<!DOCTYPE html>
 async def home() -> HTMLResponse:
     return HTMLResponse(content=HTML_PAGE)
 
+@app.post('/api/blob-input')
+async def create_blob_input() -> JSONResponse:
+    upload_id = str(uuid4())
+    return JSONResponse(
+        {
+            "upload_id": upload_id,
+            "pathname": build_input_path(upload_id),
+            "maximum_size_in_bytes": DEFAULT_MAX_DOWNLOAD_BYTES,
+        }
+    )
+
+
 @app.post('/convert')
 async def convert(
     files: list[UploadFile] = File(...),
@@ -1527,8 +1554,156 @@ async def convert(
     headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
     return Response(
         content=workbook.getvalue(),
-        media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        media_type=XLSX_CONTENT_TYPE,
         headers=headers,
+    )
+
+
+def _filename_from_export_response(response: Response) -> str:
+    disposition = response.headers.get('content-disposition', '')
+    marker = 'filename='
+    if marker not in disposition:
+        raise BlobStorageError('converter response is missing an output filename')
+    raw_filename = disposition.split(marker, 1)[1].split(';', 1)[0].strip().strip('"')
+    filename = os.path.basename(raw_filename)
+    if not filename or filename != raw_filename or not filename.lower().endswith('.xlsx'):
+        raise BlobStorageError('converter returned an invalid output filename')
+    return filename
+
+
+def _blob_http_exception(exc: BlobStorageError) -> HTTPException:
+    if isinstance(exc, BlobStorageNotFoundError):
+        return HTTPException(status_code=404, detail=str(exc))
+    if isinstance(exc, BlobStorageSizeError):
+        return HTTPException(status_code=413, detail=str(exc))
+    if isinstance(exc, BlobStorageConfigurationError):
+        return HTTPException(status_code=503, detail=str(exc))
+    if isinstance(exc, BlobStorageOperationError):
+        return HTTPException(status_code=502, detail=str(exc))
+    return HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post('/convert-from-blob')
+async def convert_from_blob(
+    upload_id: str = Form(...),
+    input_pathname: str = Form(...),
+    threshold_db: float = Form(0.5),
+    section_threshold_db: str = Form(''),
+    duration_threshold_s: str = Form(''),
+    deviation_m: float = Form(100.0),
+    expected_route_km: str = Form(''),
+    jumper_excluded_m: float = Form(0.0),
+    graph_reach_tolerance_km: float = Form(0.030),
+    event_shortfall_tolerance_km: float = Form(0.500),
+    overlength_tolerance_km: float = Form(0.500),
+    segment_start_km: str = Form(''),
+    segment_end_km: str = Form(''),
+    section_export_scope: str = Form('all'),
+    section_merge_tolerance_m: float = Form(100.0),
+    section_min_length_km: float = Form(0.0),
+    section_event_source: str = Form('all'),
+    section_boundary_priority: str = Form('event'),
+    section_allow_split: str = Form('false'),
+    section_match_tolerance_m: float = Form(100.0),
+    section_measurement_mode: str = Form('fit'),
+    orl_pass_threshold_db: float = Form(28.0),
+    orl_source_mode: str = Form('auto'),
+    orl_missing_policy: str = Form('reference'),
+    orl_allow_lower_bound: str = Form('true'),
+    orl_lower_bound_status: str = Form('Unknown'),
+    orl_physical_mode: str = Form('disabled'),
+    output_mode: str = Form('fastreporter'),
+    exporter_name: str = Form(''),
+    unit: str = Form(''),
+    route_name: str = Form(''),
+    stv_total_core: str = Form(''),
+    stv_used_core: str = Form(''),
+) -> JSONResponse:
+    try:
+        canonical_upload_id = str(UUID(str(upload_id)))
+    except (ValueError, AttributeError, TypeError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail='upload_id must be a valid UUID',
+        ) from exc
+
+    if canonical_upload_id != upload_id:
+        raise HTTPException(
+            status_code=400,
+            detail='upload_id must be a canonical UUID',
+        )
+
+    try:
+        pathname_upload_id = job_id_from_input_path(input_pathname)
+        if pathname_upload_id != canonical_upload_id:
+            raise BlobStorageError('upload_id does not match the input Blob pathname')
+
+        with PrivateBlobStorage() as storage:
+            input_bytes = storage.download_bytes(input_pathname)
+            upload = UploadFile(
+                file=io.BytesIO(input_bytes),
+                size=len(input_bytes),
+                filename='batch.zip',
+            )
+            try:
+                export_response = await convert(
+                    files=[upload],
+                    threshold_db=threshold_db,
+                    section_threshold_db=section_threshold_db,
+                    duration_threshold_s=duration_threshold_s,
+                    deviation_m=deviation_m,
+                    expected_route_km=expected_route_km,
+                    jumper_excluded_m=jumper_excluded_m,
+                    graph_reach_tolerance_km=graph_reach_tolerance_km,
+                    event_shortfall_tolerance_km=event_shortfall_tolerance_km,
+                    overlength_tolerance_km=overlength_tolerance_km,
+                    segment_start_km=segment_start_km,
+                    segment_end_km=segment_end_km,
+                    section_export_scope=section_export_scope,
+                    section_merge_tolerance_m=section_merge_tolerance_m,
+                    section_min_length_km=section_min_length_km,
+                    section_event_source=section_event_source,
+                    section_boundary_priority=section_boundary_priority,
+                    section_allow_split=section_allow_split,
+                    section_match_tolerance_m=section_match_tolerance_m,
+                    section_measurement_mode=section_measurement_mode,
+                    orl_pass_threshold_db=orl_pass_threshold_db,
+                    orl_source_mode=orl_source_mode,
+                    orl_missing_policy=orl_missing_policy,
+                    orl_allow_lower_bound=orl_allow_lower_bound,
+                    orl_lower_bound_status=orl_lower_bound_status,
+                    orl_physical_mode=orl_physical_mode,
+                    output_mode=output_mode,
+                    exporter_name=exporter_name,
+                    unit=unit,
+                    route_name=route_name,
+                    stv_total_core=stv_total_core,
+                    stv_used_core=stv_used_core,
+                )
+            finally:
+                await upload.close()
+
+            filename = _filename_from_export_response(export_response)
+            output_bytes = bytes(export_response.body)
+            output_pathname = build_output_path(canonical_upload_id, filename)
+            stored = storage.upload_bytes(
+                output_pathname,
+                output_bytes,
+                content_type=XLSX_CONTENT_TYPE,
+                overwrite=False,
+            )
+    except BlobStorageError as exc:
+        raise _blob_http_exception(exc) from exc
+
+    return JSONResponse(
+        {
+            "upload_id": canonical_upload_id,
+            "status": "succeeded",
+            "filename": filename,
+            "output_pathname": stored.pathname,
+            "content_type": stored.content_type,
+            "size": stored.size,
+        }
     )
 
 @app.get('/api/history')
