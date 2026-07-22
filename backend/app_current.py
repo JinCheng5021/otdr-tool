@@ -779,7 +779,14 @@ class OTDRParserFactory:
 
     @classmethod
     def get_parser(cls, filename: str) -> BaseOTDRParser:
-        ext = filename.split('.')[-1].lower()
+        normalized_name = str(filename or '').strip()
+        if not normalized_name or '.' not in normalized_name:
+            raise HTTPException(
+                status_code=400,
+                detail="Tên tệp không hợp lệ hoặc không có phần mở rộng.",
+            )
+
+        ext = normalized_name.rsplit('.', 1)[-1].lower()
         parser_class = cls._parsers.get(ext)
         if not parser_class:
             raise HTTPException(

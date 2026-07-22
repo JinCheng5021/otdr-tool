@@ -3,3 +3,4 @@ uvicorn>=0.27
 python-multipart>=0.0.9
 openpyxl>=3.1
 otdrparser
+vercel>=0.7.0

@@ -3,7 +3,6 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
-import json
 import math
 import re
 import struct
@@ -19,6 +18,7 @@ from pathlib import Path
 from statistics import median
 from typing import Iterable, Optional
 
+import otdrparser
 from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import MergedCell
 from openpyxl.styles import Font, PatternFill
@@ -29,10 +29,8 @@ PAT_EVENT = re.compile(r'<event\b([^>]*)>(.*?)</event>', re.S | re.I)
 PAT_ATTR = re.compile(r'(\w+)="([^"]*)"')
 PAT_CURVE_SCREEN = re.compile(r'CURVE:SCREEN\s*([\-0-9.]+),([\-0-9.]+),([\-0-9.]+),([\-0-9.]+)')
 PAT_LASER = re.compile(r'<laser\b([^>]*)>(.*?)</laser>', re.S | re.I)
-PAT_TEXT_FLOAT = re.compile(r'([+-]?\d+(?:\.\d+)?)')
 RED_FILL = PatternFill(fill_type='solid', fgColor='FF0000')
 GREEN_FILL = PatternFill(fill_type='solid', fgColor='C6EFCE')
-YELLOW_FILL = PatternFill(fill_type='solid', fgColor='FFF2CC')
 STV_DAT_FILL = PatternFill(fill_type='solid', fgColor='9DC3E6')
 STV_DUT_FILL = PatternFill(fill_type='solid', fgColor='FF0000')
 STV_SUY_HAO_FILL = PatternFill(fill_type='solid', fgColor='92D050')
@@ -47,6 +45,7 @@ _MSOR_SECTIONS_CACHE: dict[str, dict[str, bytes]] = {}
 _MINI_CURVE_CACHE: dict[str, Optional[list[int]]] = {}
 _CURVE_MAX_CACHE: dict[str, Optional[float]] = {}
 _TRACE_SERIES_CACHE: dict[str, Optional[dict]] = {}
+_OTDRPARSER_MSOR_CACHE: dict[str, list[dict]] = {}
 
 
 _NOMINAL_WAVELENGTHS_NM = (1310, 1490, 1550, 1625, 1650)
@@ -88,6 +87,25 @@ def _fr_fast_raw_key(raw: bytes) -> str:
     head = raw[:4096]
     tail = raw[-4096:] if len(raw) > 4096 else b''
     return f"{len(raw)}:{hashlib.sha1(head + tail).hexdigest()}"
+
+
+def _parse_msor_standard_blocks(raw: bytes) -> list[dict]:
+    """Parse standard MSOR blocks once using a full-content cache key."""
+    key = hashlib.sha1(raw).hexdigest()
+    cached = _OTDRPARSER_MSOR_CACHE.get(key)
+    if cached is not None:
+        return cached
+    try:
+        blocks = [block for block in otdrparser.parse(io.BytesIO(raw)) if isinstance(block, dict)]
+    except Exception:
+        blocks = []
+    _OTDRPARSER_MSOR_CACHE[key] = blocks
+    return blocks
+
+
+def _single_msor_standard_block(raw: bytes, name: str) -> Optional[dict]:
+    matches = [block for block in _parse_msor_standard_blocks(raw) if block.get('name') == name]
+    return matches[0] if len(matches) == 1 else None
 
 
 def _fr_log(logs: list[dict], stage: str, level: str, message: str) -> None:
@@ -627,6 +645,28 @@ def _parse_msor_keyevents_summary(raw: bytes) -> Optional[dict]:
         'orl_db': orl_db,
     }
 
+
+def _parse_msor_direct_keyevents_summary(raw: bytes) -> Optional[dict]:
+    """Return standard KeyEvents summary values exposed directly by otdrparser."""
+    block = _single_msor_standard_block(raw, 'KeyEvents')
+    if not block:
+        return None
+    try:
+        total_loss_db = float(block.get('total_loss'))
+        fiber_length_km = float(block.get('fiber_length')) / 1000.0
+    except Exception:
+        return None
+    if not math.isfinite(total_loss_db) or not (0.0 < total_loss_db < 200.0):
+        total_loss_db = None
+    if not math.isfinite(fiber_length_km) or not (0.0 < fiber_length_km < 1000.0):
+        fiber_length_km = None
+    if total_loss_db is None and fiber_length_km is None:
+        return None
+    return {
+        'total_loss_db': round(total_loss_db, 3) if total_loss_db is not None else None,
+        'fiber_length_km': fiber_length_km,
+    }
+
 def _extract_curve_max_km(raw: bytes) -> Optional[float]:
     key = _fr_fast_raw_key(raw)
     if key in _CURVE_MAX_CACHE:
@@ -1157,6 +1197,15 @@ def _parse_msor_metadata(file_name: str, raw: bytes) -> dict:
     job_id = _config_quoted(cfg_text, 'FSETup:JOBid') or _config_quoted(cfg_text, 'FSETUP:JOBid')
     comments = _config_quoted(cfg_text, 'FSETUP:SAVED:COMment')
     max_t = _config_number(cfg_text, 'OTDS:MAXT')
+    standard_fxd = _single_msor_standard_block(raw, 'FxdParams')
+    averaging_time_s = None
+    if standard_fxd:
+        try:
+            candidate = float(standard_fxd.get('averaging_time'))
+            if math.isfinite(candidate) and 0 < candidate <= 3600:
+                averaging_time_s = round(candidate, 3)
+        except Exception:
+            averaging_time_s = None
 
     if not cable_id and len(gen_parts) > 1:
         candidate = gen_parts[1]
@@ -1169,7 +1218,7 @@ def _parse_msor_metadata(file_name: str, raw: bytes) -> dict:
     if not location_b and len(gen_parts) > 4:
         location_b = gen_parts[4]
 
-    duration_s = _extract_avg_seconds_from_wave_payload(wave_payload) or (round(max_t, 3) if max_t else None)
+    duration_s = averaging_time_s or _extract_avg_seconds_from_wave_payload(wave_payload) or (round(max_t, 3) if max_t else None)
 
     return {
         'file_name': file_name,
@@ -1188,6 +1237,7 @@ def _parse_msor_metadata(file_name: str, raw: bytes) -> dict:
         'range_km': round(float(fxd.get('range_km')), 4) if fxd.get('range_km') else None,
         'pulse_us': round(float(fxd.get('pulse_us')), 3) if fxd.get('pulse_us') else None,
         'duration_s': duration_s,
+        'configured_max_time_s': round(max_t, 3) if max_t else None,
     }
 
 
@@ -1554,8 +1604,6 @@ def _estimate_route_total_loss_from_standard_sor(rows: list[EventRow], length_km
     discrete_event_loss = 0.0
     prev_distance = 0.0
     valid_slopes: list[float] = []
-
-    distances = [float(r.distance_km or 0.0) for r in ordered]
 
     for idx, row in enumerate(ordered):
         dist = min(float(row.distance_km or 0.0), float(length_km))
@@ -2139,8 +2187,8 @@ def _decode_msor_keyevents_records(payload: bytes, expected_count: Optional[int]
         try:
             _marker, ev_no = struct.unpack_from('<HH', payload, off)
             dist_raw = struct.unpack_from('<I', payload, off + 4)[0]
-            loss_db = _decode_keyevent_loss_db(payload, off + 8)
-            slope_raw = struct.unpack_from('<h', payload, off + 10)[0]
+            slope_raw = struct.unpack_from('<h', payload, off + 8)[0]
+            loss_db = _decode_keyevent_loss_db(payload, off + 10)
             slope_dbkm = round(slope_raw / 1000.0, 3) if abs(slope_raw) < 10000 else None
             refl_raw_i32 = struct.unpack_from('<i', payload, off + 12)[0]
             label = payload[off + 16: off + 24].decode('latin1', 'ignore').strip('\x00 ').strip()
@@ -2162,6 +2210,59 @@ def _decode_msor_keyevents_records(payload: bytes, expected_count: Optional[int]
         })
     if expected_count and len(records) > expected_count:
         records = records[:expected_count]
+    return records
+
+
+def _parse_msor_keyevents_with_otdrparser(raw: bytes, expected_count: Optional[int] = None) -> list[dict]:
+    """Read standard KeyEvents fields with the same library used by the graph viewer."""
+    candidates: list[list[dict]] = []
+    for block in _parse_msor_standard_blocks(raw):
+        if not isinstance(block, dict) or block.get('name') != 'KeyEvents':
+            continue
+        events = block.get('events')
+        if isinstance(events, list) and events:
+            candidates.append(events)
+    if not candidates:
+        return []
+
+    if expected_count:
+        exact = [events for events in candidates if len(events) == expected_count]
+        if not exact:
+            return []
+        source_events = exact[0]
+    elif len(candidates) == 1:
+        source_events = candidates[0]
+    else:
+        return []
+
+    records: list[dict] = []
+    for idx, event in enumerate(source_events):
+        try:
+            distance_km = round(float(event.get('distance_of_travel', 0.0)) / 1000.0, 6)
+        except Exception:
+            return []
+
+        def finite_number(value) -> Optional[float]:
+            try:
+                number = float(value)
+            except Exception:
+                return None
+            return number if math.isfinite(number) else None
+
+        loss_db = finite_number(event.get('splice_loss'))
+        slope_dbkm = finite_number(event.get('slope'))
+        reflectance_db = finite_number(event.get('reflection_loss'))
+        if reflectance_db is not None and (reflectance_db == 0.0 or reflectance_db < -100.0 or reflectance_db > 0.0):
+            reflectance_db = None
+        records.append({
+            'event_no_binary': idx + 1,
+            'distance_km': distance_km,
+            'loss_db': round(loss_db, 3) if loss_db is not None else None,
+            'slope_dbkm': round(slope_dbkm, 3) if slope_dbkm is not None else None,
+            'reflectance_db': round(reflectance_db, 3) if reflectance_db is not None else None,
+            'label': '',
+            'source': 'otdrparser KeyEvents',
+        })
     return records
 
 
@@ -2289,8 +2390,8 @@ def _parse_msor_binary_keyevents_events(file_name: str, raw: bytes) -> list[Even
         try:
             _marker, ev_no = struct.unpack_from('<HH', payload, off)
             dist_raw = struct.unpack_from('<I', payload, off + 4)[0]
-            loss_raw = struct.unpack_from('<h', payload, off + 8)[0]
-            slope_raw = struct.unpack_from('<h', payload, off + 10)[0]
+            slope_raw = struct.unpack_from('<h', payload, off + 8)[0]
+            loss_raw = struct.unpack_from('<h', payload, off + 10)[0]
             refl_raw = struct.unpack_from('<i', payload, off + 12)[0]
             label = payload[off + 16: off + 24].decode('latin1', 'ignore').strip('\x00 ').strip()
         except Exception:
@@ -2403,7 +2504,15 @@ def parse_smart_link_events(file_name: str, raw: bytes) -> list[EventRow]:
     try:
         if Path(file_name).suffix.lower() == '.msor':
             _ke_payload = _parse_msor_sections(raw).get('KeyEvents')
-            keyevent_records = _decode_msor_keyevents_records(_ke_payload, expected_count=expected_count) if _ke_payload else []
+            manual_records = _decode_msor_keyevents_records(_ke_payload, expected_count=expected_count) if _ke_payload else []
+            library_records = _parse_msor_keyevents_with_otdrparser(raw, expected_count=expected_count)
+            if library_records:
+                for idx, record in enumerate(library_records):
+                    if idx < len(manual_records):
+                        record['label'] = manual_records[idx].get('label', '')
+                keyevent_records = library_records
+            else:
+                keyevent_records = manual_records
     except Exception:
         keyevent_records = []
     default_wavelength = _preferred_msor_wavelength(file_name, raw, text) if Path(file_name).suffix.lower() == '.msor' else _extract_wavelength_from_text(text)
@@ -2466,6 +2575,11 @@ def parse_smart_link_events(file_name: str, raw: bytes) -> list[EventRow]:
             total_loss_db = _to_float(_get_tag(body, 'total_loss_dB') or _get_tag(body, 'total_loss'))
 
         ke_rec = keyevent_records[idx] if idx < len(keyevent_records) else None
+        if ke_rec and ke_rec.get('distance_km') is not None and distance_m is not None:
+            if abs(float(ke_rec['distance_km']) - (float(distance_m) / 1000.0)) > 0.050:
+                ke_rec = None
+        if loss_db is None and ke_rec and ke_rec.get('loss_db') is not None:
+            loss_db = ke_rec.get('loss_db')
         if loss_db is None and idx < len(fallback_losses):
             loss_db = fallback_losses[idx]
         if ke_rec:
@@ -3423,14 +3537,17 @@ def summarize_file(file_name: str, raw: bytes, parsed_context: Optional[tuple] =
     total_loss_db = fiber_end.total_loss_db if fiber_end.total_loss_db is not None else (sor_meta.get('total_loss_db') if sor_meta else None)
     total_loss_source = 'Tóm tắt SOR / điểm cuối sợi' if total_loss_db is not None else ''
     route_corrected_total_loss_db = None
+    msor_direct_summary = None
     if ext == '.msor':
-        msor_summary = _parse_msor_keyevents_summary(raw)
-        if msor_summary and isinstance(msor_summary.get('total_loss_db'), (int, float)):
-            # Prefer the binary KeyEvents route summary for MSOR. In many VIAVI/JDSU
-            # files this is the authoritative source for route loss while the smart_link
-            # XML only exposes event positions (or zero/empty total_loss_dB fields).
-            total_loss_db = float(msor_summary['total_loss_db'])
-            total_loss_source = 'Tóm tắt KeyEvents của MSOR'
+        msor_direct_summary = _parse_msor_direct_keyevents_summary(raw)
+        if msor_direct_summary and isinstance(msor_direct_summary.get('total_loss_db'), (int, float)):
+            total_loss_db = float(msor_direct_summary['total_loss_db'])
+            total_loss_source = 'KeyEvents chuẩn của MSOR (otdrparser)'
+        else:
+            msor_summary = _parse_msor_keyevents_summary(raw)
+            if msor_summary and isinstance(msor_summary.get('total_loss_db'), (int, float)):
+                total_loss_db = float(msor_summary['total_loss_db'])
+                total_loss_source = 'Tóm tắt tail KeyEvents của MSOR (fallback)'
     if trc_trace is not None and isinstance(trc_trace.get('TraceSpansLoss'), (int, float)):
         if total_loss_db is None:
             total_loss_db = float(trc_trace.get('TraceSpansLoss'))
@@ -3451,11 +3568,8 @@ def summarize_file(file_name: str, raw: bytes, parsed_context: Optional[tuple] =
             total_loss_source = 'Ước tính từ bảng sự kiện'
     parsed_total_loss_db = round(total_loss_db, 3) if total_loss_db is not None else None
     length_km = _safe_round3(sor_meta.get('length_km')) if sor_meta and sor_meta.get('length_km') is not None else _safe_round3(fiber_end.distance_km)
-    if ext == '.msor' and length_km in (None, 0):
-        msor_summary = _parse_msor_keyevents_summary(raw)
-        # Some MSOR tails expose raw finish distance, but smart_link event positions are
-        # usually already reliable. We only keep the finish raw for future tuning and do
-        # not attempt a generic raw->km conversion here.
+    if ext == '.msor' and msor_direct_summary and isinstance(msor_direct_summary.get('fiber_length_km'), (int, float)):
+        length_km = _safe_round3(msor_direct_summary['fiber_length_km'])
     if trc_trace is not None and isinstance(trc_trace.get('SpansLength'), (int, float)):
         length_km = _safe_round3(float(trc_trace.get('SpansLength')) / 1000.0)
     if length_km is None:
@@ -4099,12 +4213,6 @@ def _extract_segment_event_rows(file_name: str, raw: bytes, segment_start_km: Op
     end_km = max(float(segment_start_km), float(segment_end_km))
     rows = extract_raw_event_rows(file_name, raw)
     return [row for row in rows if row.get('distance_km') is not None and start_km <= float(row['distance_km']) <= end_km and isinstance(row.get('loss_db'), (int, float)) and float(row['loss_db']) > 0]
-
-
-def _fr_copy_rows_to_sheet(ws, rows: list[list[object]]) -> None:
-    for r_idx, row in enumerate(rows, start=1):
-        for c_idx, value in enumerate(row, start=1):
-            ws.cell(r_idx, c_idx, value)
 
 
 _TABLES_TEMPLATE_ROWS = [
@@ -5408,7 +5516,6 @@ def _extract_raw_trace_series(
         if isinstance(cached, dict):
             return {**cached}
         return cached
-    result: Optional[dict] = None
     try:
         if ext == '.sor' and sor_meta and sor_meta.get('trace_values_db'):
             vals = [float(v) for v in sor_meta.get('trace_values_db')]
@@ -6520,31 +6627,6 @@ def _fr_fill_core_metrics_sheet(ws, summaries: list[FileSummary], contexts: dict
         row += 1
     _fr_selective_autofit(ws, max_scan_rows=max(row, 20), max_width=70)
 
-
-def _fr_fill_output_rules_sheet(ws, *, threshold_db: float, deviation_m: float, output_mode: str, section_export_scope: str, section_measurement_mode: str, section_event_source: str, section_boundary_priority: str, expected_route_km: Optional[float], graph_reach_tolerance_km: Optional[float], event_shortfall_tolerance_km: Optional[float]) -> None:
-    _fr_write_header_row(ws, ['Nhóm', 'Rule đang khóa trong output'])
-    rules = [
-        ('Lõi dữ liệu', 'STV và FastReporter cùng dùng một context chuẩn hóa từ parser; không parse lại riêng ở từng đầu ra.'),
-        ('Ngưỡng event', f'Ngưỡng event hiện tại = {threshold_db}. FastReporter sự kiện đỏ giữ rule |loss| >= ngưỡng; STV giữ rule theo format STV đã tinh chỉnh.'),
-        ('Gom cụm event', f'Sai số gom cụm event dùng chung = {deviation_m} m.'),
-        ('Ngưỡng section', f'Ngưỡng Section Loss để tô đỏ = {section_threshold_db if section_threshold_db is not None else "chưa đặt"} dB. Mã ID S+E hiển thị một lần ở tiêu đề mỗi section = Start km + End km; đây chỉ là mã nhận diện layout, không phải chiều dài tuyến và không tạo cột riêng trong dữ liệu core.'),
-        ('Duration', f'Ngưỡng duration = {duration_threshold_s if duration_threshold_s is not None else "chưa đặt"} giây. Nếu core có duration thấp hơn ngưỡng thì đánh dấu Fail trong Core Metrics/Link Results.'),
-        ('Strict Validation', 'Sheet Strict Validation kiểm tra parser, metadata, route length, attenuation sanity, event coverage, trace scale, fit readiness và ORL readiness. Sheet này chỉ cảnh báo/khóa quyền dùng để kết luận trên giấy, tuyệt đối không sửa số liệu đã tính.'),
-        ('Section', f'Section export scope = {section_export_scope}; mode tính section = {section_measurement_mode}; nguồn event dựng section = {section_event_source}; ưu tiên = {section_boundary_priority}. Với mode fit, app ưu tiên raw-trace linear fit, xuất R²/RMS residual và fallback về event/slope nếu fit chưa đủ tin cậy.'),
-        ('ORL', 'ORL Analysis phân tách measured ORL / metadata lower-bound / not available. Chỉ measured ORL mới có Use for Judgment = Yes. Lower-bound dạng <xx.xx luôn được ghi rõ là tham khảo, không phải span ORL thật.'),
-        ('ORL vật lý từ trace', 'Mặc định tắt. Khi bật diagnostic/experimental, app chỉ kiểm tra điều kiện hiệu chuẩn; nếu thiếu backscatter/launch power/reference calibration thì không tạo số ORL giả.'),
-        ('Route check', f'Chiều dài tuyến chuẩn = {expected_route_km}; sai số chạm tuyến = {graph_reach_tolerance_km}; hụt event cho phép = {event_shortfall_tolerance_km}.'),
-        ('Output mode', f'Output hiện tại = {output_mode}. Chỉ khác layout, không khác lõi số liệu.')
-    ]
-    row = 2
-    for group, rule in rules:
-        ws.cell(row, 1, group)
-        ws.cell(row, 2, rule)
-        row += 1
-    _fr_selective_autofit(ws, max_scan_rows=max(row, 10), max_width=110)
-
-
-
 def _duration_status_from_meta(ctx: dict, duration_threshold_s: Optional[float]) -> tuple[Optional[float], str, str]:
     """Return duration, status, note without changing parser logic."""
     meta = (ctx or {}).get('metadata', {}) if isinstance(ctx, dict) else {}
@@ -6673,108 +6755,7 @@ def _fr_fill_link_results(ws, summaries: list[FileSummary], contexts: dict[str, 
         row += 1
 
 
-def _fr_fill_events(ws, summaries: list[FileSummary], contexts: dict[str, dict], event_defs: list[dict], deviation_m: float, threshold_db: float) -> None:
-    summary_start = _fr_expand_pair_table(
-        ws,
-        data_start=5,
-        template_rows=(43, 44),
-        insert_before=45,
-        count=len(summaries),
-        reserved_pairs=20,
-    )
-    _fr_ensure_events_capacity(ws, len(event_defs))
-    max_events = max(_fr_count_real_pair_blocks(ws, header_merge_rows=(1, 2)), len(event_defs))
 
-    # Header
-    for i in range(1, max_events + 1):
-        col = 3 + (i - 1) * 2
-        ws.cell(1, col).value = f'Event {i}'
-        if i <= len(event_defs):
-            item = event_defs[i - 1]
-            ws.cell(2, col).value = item.get('label')
-            ws.cell(3, col).value = round(float(item.get('distance_km') or 0.0), 4)
-            ws.cell(3, col + 1).value = 'km'
-        else:
-            ws.cell(2, col).value = None
-            ws.cell(3, col).value = None
-            ws.cell(3, col + 1).value = None
-
-    # Clear data and summary area
-    _fr_clear_cells(ws, 5, summary_start + 3, 1, ws.max_column)
-
-    rendered_count = len(summaries)
-    all_event_cols_loss = [[] for _ in range(max_events)]
-    all_event_cols_refl = [[] for _ in range(max_events)]
-
-    for idx, summary in enumerate(summaries):
-        data_row = 5 + idx * 2
-        status_row = data_row + 1
-        ctx = contexts.get(summary.file_name, {})
-        rows = ctx.get('events', [])
-        cluster_map: dict[int, EventRow] = {}
-        for ev in rows:
-            di = _fr_assign_event_to_def(ev, event_defs, deviation_m)
-            if di is None:
-                continue
-            cur = cluster_map.get(di)
-            if cur is None:
-                cluster_map[di] = ev
-            else:
-                rep = float(event_defs[di - 1]['distance_km'])
-                if abs(float(ev.distance_km or 0) - rep) < abs(float(cur.distance_km or 0) - rep):
-                    cluster_map[di] = ev
-
-        m = re.search(r'(\d{3,4})', summary.wavelength_display or '')
-        ws.cell(data_row, 1).value = _display_fiber_label(summary, contexts.get(summary.file_name, {}).get('metadata', {}))
-        ws.cell(data_row, 2).value = int(m.group(1)) if m else None
-
-        for i in range(1, len(event_defs) + 1):
-            col = 3 + (i - 1) * 2
-            ev = cluster_map.get(i)
-            if not ev:
-                continue
-            loss = ev.loss_db
-            raw_refl = ev.reflectance_db
-            refl = _fr_reportable_reflectance_db(raw_refl)
-            ws.cell(data_row, col).value = loss
-            ws.cell(data_row, col + 1).value = refl
-            ws.cell(status_row, col).value = _fr_event_status(loss, threshold_db)
-            ws.cell(status_row, col + 1).value = _fr_reflectance_status(raw_refl)
-            if isinstance(loss, (int, float)):
-                ws.cell(data_row, col).number_format = '0.000'
-                if abs(float(loss)) + 1e-12 >= float(threshold_db):
-                    ws.cell(data_row, col).fill = RED_FILL
-                    ws.cell(status_row, col).fill = RED_FILL
-                all_event_cols_loss[i - 1].append(float(loss))
-            if isinstance(refl, (int, float)):
-                all_event_cols_refl[i - 1].append(float(refl))
-
-    for offs, label in enumerate(['Minimum', 'Maximum', 'Average', 'Occurences']):
-        ws.cell(summary_start + offs, 1).value = label
-
-    def _stats(vals, denom):
-        if not vals:
-            return None, None, None, f'0/{denom}'
-        return round(min(vals), 3), round(max(vals), 3), round(sum(vals) / len(vals), 3), f'{len(vals)}/{denom}'
-
-    for i in range(1, max_events + 1):
-        col = 3 + (i - 1) * 2
-        loss_vals = all_event_cols_loss[i - 1]
-        refl_vals = all_event_cols_refl[i - 1]
-        loss_min, loss_max, loss_avg, loss_occ = _stats(loss_vals, rendered_count)
-        refl_min, refl_max, refl_avg, refl_occ = _stats(refl_vals, rendered_count)
-        ws.cell(summary_start, col).value = loss_min
-        ws.cell(summary_start, col + 1).value = refl_min
-        ws.cell(summary_start + 1, col).value = loss_max
-        ws.cell(summary_start + 1, col + 1).value = refl_max
-        ws.cell(summary_start + 2, col).value = loss_avg
-        ws.cell(summary_start + 2, col + 1).value = refl_avg
-        ws.cell(summary_start + 3, col).value = loss_occ
-        for rr in [summary_start, summary_start + 1, summary_start + 2]:
-            if isinstance(ws.cell(rr, col).value, (int, float)):
-                ws.cell(rr, col).number_format = '0.000'
-            if isinstance(ws.cell(rr, col + 1).value, (int, float)):
-                ws.cell(rr, col + 1).number_format = '0.000'
 
 
 def _fr_fill_sections(ws, summaries: list[FileSummary], contexts: dict[str, dict], sections: list[dict], threshold_db: float, section_match_tolerance_m: float = 100.0, section_measurement_mode: str = 'fit', section_threshold_db: Optional[float] = None) -> dict[str, list[tuple[Optional[float], Optional[float]]]]:
@@ -7208,51 +7189,6 @@ def _fr_selective_autofit(ws, max_scan_rows: int = 120, max_width: int = 60) -> 
 
 def _stv_display_file_name(file_name: str) -> str:
     return Path(file_name).name
-
-
-def _stv_display_loss_for_row(row: EventRow, is_terminal_row: bool = False) -> Optional[float]:
-    if row.loss_db is None:
-        return None
-    try:
-        loss = float(row.loss_db)
-    except Exception:
-        return None
-    if loss == 0:
-        return None
-    label = (row.label or '').strip()
-    if row.event_type == 'First Connector':
-        return None
-    if is_terminal_row:
-        return None
-    if len(label) >= 2 and label[1] == 'E':
-        return None
-    return round(loss, 3)
-
-
-def _stv_display_loss_for_row(row: EventRow, threshold_db: float = 0.5, is_terminal_row: bool = False) -> Optional[float]:
-    """Giá trị hiển thị trên bảng STV: chỉ giữ suy hao điểm dương vượt ngưỡng."""
-    if row.loss_db is None:
-        return None
-    try:
-        loss = float(row.loss_db)
-    except Exception:
-        return None
-    label = (row.label or '').strip()
-    if row.event_type == 'First Connector':
-        return None
-    if is_terminal_row:
-        return None
-    if len(label) >= 2 and label[1] == 'E':
-        return None
-    if loss <= 0:
-        return None
-    if loss + 1e-12 < float(threshold_db):
-        return None
-    return round(loss, 3)
-
-
-
-
 def _stv_assessment_fill(status: str):
     if status == 'Đạt':
         return STV_DAT_FILL
@@ -7673,62 +7609,7 @@ def _stv_fill_raw_events_sheet(ws, summaries: list[FileSummary], contexts: dict[
     ws.column_dimensions['L'].width = 40
 
 
-def _stv_build_workbook(
-    summaries: list[FileSummary],
-    contexts: dict[str, dict],
-    event_defs: list[dict],
-    deviation_m: float,
-    threshold_db: float,
-    expected_route_km: Optional[float],
-    jumper_excluded_m: float,
-    graph_reach_tolerance_km: Optional[float],
-    event_shortfall_tolerance_km: Optional[float],
-    skipped: list[str],
-    logs: Optional[list[dict]] = None,
-) -> BytesIO:
-    wb = Workbook()
-    ws_main = wb.active
-    _stv_fill_main_sheet(
-        ws_main,
-        summaries,
-        contexts,
-        event_defs,
-        deviation_m=deviation_m,
-        threshold_db=threshold_db,
-        expected_route_km=expected_route_km,
-        jumper_excluded_m=jumper_excluded_m,
-        graph_reach_tolerance_km=graph_reach_tolerance_km,
-        event_shortfall_tolerance_km=event_shortfall_tolerance_km,
-    )
-    ws_graph = wb.create_sheet('Kiểm tra đồ thị')
-    _stv_fill_graph_check_sheet(ws_graph, summaries, contexts)
-    ws_skipped = wb.create_sheet('Tệp bỏ qua')
-    _stv_fill_skipped_sheet(ws_skipped, skipped)
-    ws_raw = wb.create_sheet('Sự kiện thô')
-    _stv_fill_raw_events_sheet(ws_raw, summaries, contexts)
-    if sections:
-        _fr_precompute_section_fit_quality(summaries, contexts, sections, section_match_tolerance_m=section_match_tolerance_m, section_measurement_mode=section_measurement_mode)
-        ws_fit = wb.create_sheet('Section Fit Quality')
-        _fr_fill_section_fit_quality_sheet(ws_fit, summaries, contexts)
-    ws_raw_diag = wb.create_sheet('Raw Trace Diagnostics')
-    _fr_fill_raw_trace_diagnostics_sheet(ws_raw_diag, summaries, contexts)
-    ws_orl = wb.create_sheet('ORL Analysis')
-    _fr_fill_orl_analysis_sheet(ws_orl, summaries, contexts)
-    ws_parser = wb.create_sheet('Parser Diagnostics')
-    _fr_fill_parser_diagnostics_sheet(ws_parser, summaries, contexts, skipped)
-    ws_vendor = wb.create_sheet('Vendor Compatibility')
-    _fr_fill_vendor_compatibility_matrix_sheet(ws_vendor, summaries, contexts, skipped)
-    ws_strict = wb.create_sheet('Strict Validation')
-    _fr_fill_strict_validation_sheet(ws_strict, summaries, contexts, expected_route_km=expected_route_km, length_tolerance_km=length_tolerance_km if 'length_tolerance_km' in locals() else 0.300, graph_reach_tolerance_km=graph_reach_tolerance_km, event_shortfall_tolerance_km=event_shortfall_tolerance_km, duration_threshold_s=duration_threshold_s if 'duration_threshold_s' in locals() else None, skipped=skipped)
-    ws_core = wb.create_sheet('Core Metrics')
-    _fr_fill_core_metrics_sheet(ws_core, summaries, contexts, threshold_db=threshold_db, section_pairs_by_file=None, duration_threshold_s=duration_threshold_s)
-    ws_rules = wb.create_sheet('Output Rules')
-    _fr_fill_output_rules_sheet(ws_rules, threshold_db=threshold_db, deviation_m=deviation_m, output_mode='stv', section_export_scope='all', section_measurement_mode='fit', section_event_source='all', section_boundary_priority='event', expected_route_km=expected_route_km, graph_reach_tolerance_km=graph_reach_tolerance_km, event_shortfall_tolerance_km=event_shortfall_tolerance_km)
-    _fr_apply_workbook_polish(wb)
-    output = BytesIO()
-    wb.save(output)
-    output.seek(0)
-    return output
+
 
 
 def _fr_apply_workbook_polish(wb: Workbook) -> None:
@@ -8748,8 +8629,6 @@ def _trace_profile_for_diagnostics(summary: FileSummary, ctx: dict, diag: dict) 
     distance_ok = diag.get('distance_scale_ok')
     candidate_found = bool(diag.get('candidate_found'))
     candidate_note = str(diag.get('candidate_note') or '')
-    raw_status = str(diag.get('raw_status') or '')
-
     availability = 'Chưa giải mã được trace trong app'
     quality = 'Không có dữ liệu trace dùng được'
     graph_mode = 'Event/Section schematic'
@@ -8947,177 +8826,6 @@ def _fr_fill_run_log_sheet(ws, logs: list[dict], skipped: list[str]) -> None:
                 ws.cell(row, c).fill = LOG_WARN_FILL
             row += 1
     _fr_selective_autofit(ws, max_scan_rows=max(row, 20), max_width=90)
-
-
-def build_workbook_from_uploads(
-    files: Iterable[tuple[str, bytes]],
-    threshold_db: float = 0.5,
-    section_threshold_db: Optional[float] = None,
-    duration_threshold_s: Optional[float] = None,
-    deviation_m: float = 100.0,
-    expected_route_km: Optional[float] = None,
-    jumper_excluded_m: float = 0.0,
-    length_tolerance_km: float = 0.300,
-    graph_reach_tolerance_km: Optional[float] = None,
-    event_shortfall_tolerance_km: Optional[float] = None,
-    overlength_tolerance_km: Optional[float] = None,
-    segment_start_km: Optional[float] = None,
-    segment_end_km: Optional[float] = None,
-    section_export_scope: str = 'all',
-    section_merge_tolerance_m: Optional[float] = None,
-    section_min_length_km: float = 0.0,
-    section_event_source: str = 'all',
-    section_boundary_priority: str = 'event',
-    section_allow_split: bool = False,
-    section_match_tolerance_m: float = 100.0,
-    section_measurement_mode: str = 'fit',
-    orl_pass_threshold_db: float = 28.0,
-    orl_source_mode: str = 'auto',
-    orl_allow_lower_bound: bool = True,
-    orl_lower_bound_status: str = 'Unknown',
-    orl_physical_mode: str = 'disabled',
-    output_mode: str = 'fastreporter',
-) -> BytesIO:
-    t0 = time.perf_counter()
-    logs: list[dict] = []
-    _fr_log(logs, 'run', 'INFO', 'Bắt đầu dựng workbook.')
-    files = list(files)
-    summaries, skipped, _file_payload_map, contexts = _fr_build_context(
-        files,
-        threshold_db=threshold_db,
-        expected_route_km=expected_route_km,
-        jumper_excluded_m=jumper_excluded_m,
-        length_tolerance_km=length_tolerance_km,
-        graph_reach_tolerance_km=graph_reach_tolerance_km,
-        event_shortfall_tolerance_km=event_shortfall_tolerance_km,
-        overlength_tolerance_km=overlength_tolerance_km,
-        segment_start_km=segment_start_km,
-        segment_end_km=segment_end_km,
-        orl_pass_threshold_db=orl_pass_threshold_db,
-        orl_source_mode=orl_source_mode,
-        orl_allow_lower_bound=orl_allow_lower_bound,
-        orl_lower_bound_status=orl_lower_bound_status,
-        orl_physical_mode=orl_physical_mode,
-        logs=logs,
-    )
-    if not summaries:
-        message = ' | '.join(skipped) if skipped else 'Không có file hợp lệ nào được tải lên.'
-        raise ValueError(message)
-
-    event_defs = _fr_build_common_event_defs(contexts, deviation_m=deviation_m)
-    _fr_log(logs, 'run', 'INFO', 'Phase 2: dùng chung event defs và lõi dữ liệu chuẩn hóa cho cả STV và FastReporter.')
-    sections = _fr_build_common_sections(event_defs, summaries, contexts, deviation_m=deviation_m, threshold_db=threshold_db, section_merge_tolerance_m=section_merge_tolerance_m, section_min_length_km=section_min_length_km, section_event_source=section_event_source, section_boundary_priority=section_boundary_priority, section_allow_split=section_allow_split)
-    if str(section_export_scope).lower() == 'selected_range' and segment_start_km is not None and segment_end_km is not None:
-        sections = _fr_clip_sections_to_range(sections, segment_start_km, segment_end_km)
-        try:
-            _fr_log(logs, 'run', 'INFO', f'Giới hạn xuất Sections theo đoạn người dùng chọn: {min(float(segment_start_km), float(segment_end_km)):.3f} - {max(float(segment_start_km), float(segment_end_km)):.3f} km | Số section sau khi cắt: {len(sections)}')
-        except Exception:
-            pass
-    elif str(section_export_scope).lower() == 'selected_range':
-        _fr_log(logs, 'run', 'WARN', 'Đã chọn chỉ xuất section theo đoạn đã chọn nhưng chưa nhập đủ Đoạn bắt đầu/Đoạn kết thúc. App giữ nguyên toàn bộ section của tuyến.')
-
-    if str(output_mode).lower() == 'stv':
-        _fr_log(logs, 'run', 'INFO', 'Xuất theo định dạng STV tinh chỉnh dùng chung lõi tính toán hiện tại.')
-        return _stv_build_workbook(
-            summaries,
-            contexts,
-            event_defs,
-            deviation_m=deviation_m,
-            threshold_db=threshold_db,
-            expected_route_km=expected_route_km,
-            jumper_excluded_m=jumper_excluded_m,
-            graph_reach_tolerance_km=graph_reach_tolerance_km if graph_reach_tolerance_km is not None else length_tolerance_km,
-            event_shortfall_tolerance_km=event_shortfall_tolerance_km if event_shortfall_tolerance_km is not None else length_tolerance_km,
-            skipped=skipped,
-            logs=logs,
-        )
-
-    template_path = Path(__file__).with_name('2.xlsx')
-    if not template_path.exists():
-        raise FileNotFoundError('Không tìm thấy template Excel (2.xlsx) trong thư mục chương trình.')
-
-    wb = load_workbook(template_path)
-    for warn in _fr_validate_template_or_raise(template_path, wb):
-        _fr_log(logs, 'template', 'WARN', warn)
-    _fr_log(logs, 'template', 'INFO', f'Template OK: {template_path.name}')
-
-    # General Information (fill directly from per-file metadata, giữ nguyên layout template)
-    ws_info = wb['General Information']
-    _fr_fill_general_information_template(ws_info, summaries, contexts)
-
-    # Sections first to get per-file section pairs
-    section_pairs_by_file = _fr_fill_sections(wb['Sections'], summaries, contexts, sections, threshold_db, section_match_tolerance_m=section_match_tolerance_m, section_measurement_mode=section_measurement_mode, section_threshold_db=section_threshold_db)
-
-    # Link results
-    _fr_fill_link_results(wb['Link Results'], summaries, contexts, section_pairs_by_file, duration_threshold_s=duration_threshold_s)
-
-    # Events
-    _fr_fill_events(wb['Events'], summaries, contexts, event_defs, deviation_m, threshold_db)
-
-    # Export all control parameters and the calculations they drive without changing core algorithms.
-    for extra_name in ['App Parameters', 'Route Analysis', 'Segment Analysis', 'Segment Events', 'Section Fit Quality', 'Raw Trace Diagnostics', 'ORL Analysis', 'Parser Diagnostics', 'Vendor Compatibility', 'Strict Validation', 'Run Log', 'Core Metrics', 'Output Rules']:
-        _fr_safe_sheet_remove(wb, extra_name)
-    ws_params = wb.create_sheet('App Parameters')
-    _fr_fill_app_parameters_sheet(
-        ws_params,
-        threshold_db=threshold_db,
-        section_threshold_db=section_threshold_db,
-        duration_threshold_s=duration_threshold_s,
-        deviation_m=deviation_m,
-        expected_route_km=expected_route_km,
-        jumper_excluded_m=jumper_excluded_m,
-        length_tolerance_km=length_tolerance_km,
-        graph_reach_tolerance_km=graph_reach_tolerance_km,
-        event_shortfall_tolerance_km=event_shortfall_tolerance_km,
-        overlength_tolerance_km=overlength_tolerance_km,
-        segment_start_km=segment_start_km,
-        segment_end_km=segment_end_km,
-        section_export_scope=section_export_scope,
-        section_merge_tolerance_m=section_merge_tolerance_m,
-        section_min_length_km=section_min_length_km,
-        section_event_source=section_event_source,
-        section_boundary_priority=section_boundary_priority,
-        section_allow_split=section_allow_split,
-        section_match_tolerance_m=section_match_tolerance_m,
-        section_measurement_mode=section_measurement_mode,
-        orl_pass_threshold_db=orl_pass_threshold_db,
-        orl_source_mode=orl_source_mode,
-        orl_allow_lower_bound=orl_allow_lower_bound,
-        orl_lower_bound_status=orl_lower_bound_status,
-        orl_physical_mode=orl_physical_mode,
-    )
-    ws_route = wb.create_sheet('Route Analysis')
-    _fr_fill_route_analysis_sheet(ws_route, summaries, contexts)
-    ws_segment = wb.create_sheet('Segment Analysis')
-    _fr_fill_segment_analysis_sheet(ws_segment, summaries, contexts)
-    ws_segment_events = wb.create_sheet('Segment Events')
-    _fr_fill_segment_events_sheet(ws_segment_events, summaries, contexts)
-    ws_fit = wb.create_sheet('Section Fit Quality')
-    _fr_fill_section_fit_quality_sheet(ws_fit, summaries, contexts)
-    ws_raw_diag = wb.create_sheet('Raw Trace Diagnostics')
-    _fr_fill_raw_trace_diagnostics_sheet(ws_raw_diag, summaries, contexts)
-    ws_orl = wb.create_sheet('ORL Analysis')
-    _fr_fill_orl_analysis_sheet(ws_orl, summaries, contexts)
-    ws_parser = wb.create_sheet('Parser Diagnostics')
-    _fr_fill_parser_diagnostics_sheet(ws_parser, summaries, contexts, skipped)
-    ws_vendor = wb.create_sheet('Vendor Compatibility')
-    _fr_fill_vendor_compatibility_matrix_sheet(ws_vendor, summaries, contexts, skipped)
-    ws_strict = wb.create_sheet('Strict Validation')
-    _fr_fill_strict_validation_sheet(ws_strict, summaries, contexts, expected_route_km=expected_route_km, length_tolerance_km=length_tolerance_km if 'length_tolerance_km' in locals() else 0.300, graph_reach_tolerance_km=graph_reach_tolerance_km, event_shortfall_tolerance_km=event_shortfall_tolerance_km, duration_threshold_s=duration_threshold_s if 'duration_threshold_s' in locals() else None, skipped=skipped)
-    ws_core = wb.create_sheet('Core Metrics')
-    _fr_fill_core_metrics_sheet(ws_core, summaries, contexts, threshold_db=threshold_db, section_pairs_by_file=section_pairs_by_file, duration_threshold_s=duration_threshold_s)
-    ws_rules = wb.create_sheet('Output Rules')
-    _fr_fill_output_rules_sheet(ws_rules, threshold_db=threshold_db, deviation_m=deviation_m, output_mode='fastreporter', section_export_scope=section_export_scope, section_measurement_mode=section_measurement_mode, section_event_source=section_event_source, section_boundary_priority=section_boundary_priority, expected_route_km=expected_route_km, graph_reach_tolerance_km=graph_reach_tolerance_km, event_shortfall_tolerance_km=event_shortfall_tolerance_km)
-    ws_log = wb.create_sheet('Run Log')
-    _fr_log(logs, 'run', 'INFO', f'Tổng file hợp lệ: {len(summaries)} | Event defs: {len(event_defs)} | Sections: {len(sections)}')
-    _fr_log(logs, 'run', 'INFO', f'Thời gian dựng workbook: {time.perf_counter() - t0:.2f}s')
-    _fr_fill_run_log_sheet(ws_log, logs, skipped)
-    _fr_apply_workbook_polish(wb)
-
-    output = BytesIO()
-    wb.save(output)
-    output.seek(0)
-    return output
 
 
 # ===== Phase 3 safe overrides =====
@@ -9736,7 +9444,7 @@ def _stv_build_workbook(
     ws_vendor = wb.create_sheet('Vendor Compatibility')
     _fr_fill_vendor_compatibility_matrix_sheet(ws_vendor, summaries, contexts, skipped)
     ws_strict = wb.create_sheet('Strict Validation')
-    _fr_fill_strict_validation_sheet(ws_strict, summaries, contexts, expected_route_km=expected_route_km, length_tolerance_km=length_tolerance_km if 'length_tolerance_km' in locals() else 0.300, graph_reach_tolerance_km=graph_reach_tolerance_km, event_shortfall_tolerance_km=event_shortfall_tolerance_km, duration_threshold_s=duration_threshold_s if 'duration_threshold_s' in locals() else None, skipped=skipped)
+    _fr_fill_strict_validation_sheet(ws_strict, summaries, contexts, expected_route_km=expected_route_km, length_tolerance_km=0.300, graph_reach_tolerance_km=graph_reach_tolerance_km, event_shortfall_tolerance_km=event_shortfall_tolerance_km, duration_threshold_s=duration_threshold_s, skipped=skipped)
     ws_core = wb.create_sheet('Core Metrics')
     _fr_fill_core_metrics_sheet(ws_core, summaries, contexts, threshold_db=threshold_db, section_pairs_by_file=None, duration_threshold_s=duration_threshold_s)
     ws_rules = wb.create_sheet('Output Rules')
@@ -9931,239 +9639,3 @@ def build_workbook_from_uploads(
     wb.save(output)
     output.seek(0)
     return output
-
-
-# ---------------------------------------------------------------------------
-# Phase 7.2 - Trace Viewer payload
-# ---------------------------------------------------------------------------
-def _phase72_safe_float(value, digits: int = 6):
-    try:
-        if value is None:
-            return None
-        f = float(value)
-        if not math.isfinite(f):
-            return None
-        return round(f, digits)
-    except Exception:
-        return None
-
-
-def _phase72_downsample_for_graph(x_values: list[float], y_values: list[float], max_points: int = 1600) -> tuple[list[float], list[float]]:
-    """Return a lightweight graph series for the browser.
-
-    This keeps Phase 7.2 responsive on phone/Tailscale while preserving the
-    overall OTDR shape.  The original trace remains unchanged in the parser.
-    """
-    if not x_values or not y_values or len(x_values) != len(y_values):
-        return [], []
-    pairs = []
-    for xx, yy in zip(x_values, y_values):
-        try:
-            x = float(xx); y = float(yy)
-        except Exception:
-            continue
-        if math.isfinite(x) and math.isfinite(y):
-            pairs.append((x, y))
-    if not pairs:
-        return [], []
-    pairs.sort(key=lambda p: p[0])
-    if len(pairs) <= max_points:
-        return [round(p[0], 6) for p in pairs], [round(p[1], 6) for p in pairs]
-    step = max(1, math.ceil(len(pairs) / max_points))
-    sampled = pairs[::step]
-    if sampled[-1] != pairs[-1]:
-        sampled.append(pairs[-1])
-    return [round(p[0], 6) for p in sampled], [round(p[1], 6) for p in sampled]
-
-
-def _phase72_estimate_display_slope(x_values: list[float], y_values: list[float]) -> Optional[float]:
-    """Estimate the display trend of a trace series.
-
-    Some vendor mini/display curves store cumulative loss/amplitude in the
-    opposite sign compared with the visual OTDR trace.  This helper is used only
-    for browser display orientation; it does not change raw data used by the
-    parser or Excel calculations.
-    """
-    pairs: list[tuple[float, float]] = []
-    for xx, yy in zip(x_values or [], y_values or []):
-        try:
-            x = float(xx); y = float(yy)
-        except Exception:
-            continue
-        if math.isfinite(x) and math.isfinite(y):
-            pairs.append((x, y))
-    if len(pairs) < 2:
-        return None
-    pairs.sort(key=lambda p: p[0])
-    x0, x1 = pairs[0][0], pairs[-1][0]
-    if abs(x1 - x0) < 1e-9:
-        return None
-    if len(pairs) < 4:
-        return (pairs[-1][1] - pairs[0][1]) / (x1 - x0)
-    x_mean = sum(p[0] for p in pairs) / len(pairs)
-    y_mean = sum(p[1] for p in pairs) / len(pairs)
-    den = sum((p[0] - x_mean) ** 2 for p in pairs)
-    if den <= 1e-12:
-        return None
-    num = sum((p[0] - x_mean) * (p[1] - y_mean) for p in pairs)
-    return num / den
-
-
-def _phase72_orient_graph_series_downward(x_values: list[float], y_values: list[float]) -> tuple[list[float], str, str, str]:
-    """Return a display series whose OTDR trend visually falls with distance.
-
-    For a real OTDR trace, the displayed backscatter level should generally go
-    downward as distance increases.  Some decoded mini-curves are stored as
-    cumulative loss/normalized amplitude and therefore numerically rise with
-    distance.  In that case we mirror the *display copy* of y around the first
-    valid point.  This is intentionally display-only: section fit, Events, ORL
-    and Excel calculations still use the original parsed values.
-    """
-    if not x_values or not y_values or len(x_values) != len(y_values):
-        return y_values, 'unknown', 'Không đủ điểm để xác định chiều đồ thị.', 'Trace level'
-    slope = _phase72_estimate_display_slope(x_values, y_values)
-    finite_y = [float(y) for y in y_values if isinstance(y, (int, float)) and math.isfinite(float(y))]
-    if slope is None or not finite_y:
-        return y_values, 'unknown', 'Không đủ dữ liệu để xác định chiều đồ thị.', 'Trace level'
-    y_range = max(finite_y) - min(finite_y)
-    if y_range <= 1e-9:
-        return y_values, 'flat', 'Đồ thị gần như phẳng, giữ nguyên chiều hiển thị.', 'Trace level'
-    # Positive slope means the decoded display series rises with distance; OTDR
-    # visual convention should fall with distance.  Use a small threshold to
-    # avoid flipping nearly-flat noisy curves.
-    if slope > max(1e-6, y_range * 1e-5 / max(max(x_values) - min(x_values), 1e-9)):
-        anchor = float(y_values[0])
-        oriented = [round(2 * anchor - float(y), 6) for y in y_values]
-        return (
-            oriented,
-            'flipped_for_otdr_display',
-            'Dữ liệu trace/mini-curve có xu hướng tăng theo km nên app đã đảo chiều hiển thị để đồ thị OTDR đi xuống. Việc này chỉ áp dụng cho đồ thị, không đổi dữ liệu tính toán.',
-            'Trace level hiển thị',
-        )
-    return (
-        [round(float(y), 6) for y in y_values],
-        'native_downward',
-        'Chiều dữ liệu phù hợp quy ước OTDR, giữ nguyên hiển thị.',
-        'Trace level',
-    )
-
-
-
-def _phase72_build_preview_sections_for_file(
-    summary: FileSummary,
-    events: list[EventRow],
-    *,
-    threshold_db: float = 0.5,
-    section_merge_tolerance_m: Optional[float] = None,
-    section_min_length_km: float = 0.0,
-    section_event_source: str = 'all',
-    segment_start_km: Optional[float] = None,
-    segment_end_km: Optional[float] = None,
-) -> list[dict]:
-    """Cheap per-file section boundaries for Trace Viewer preview.
-
-    Full Excel export still uses the common-section pipeline.  The browser only
-    needs visual boundaries, so this creates sections directly from the selected
-    file's event positions and runs in near-linear time.
-    """
-    length = _phase72_safe_float(summary.length_km or summary.end_distance_km or summary.graph_end_km, 6)
-    if length is None or length <= 0:
-        dists = [float(e.distance_km) for e in events if e.distance_km is not None]
-        length = max(dists) if dists else 1.0
-    merge_tol_km = max(float(section_merge_tolerance_m or 80.0) / 1000.0, 0.001)
-    min_len = max(float(section_min_length_km or 0.0), 0.0)
-    use_filtered = str(section_event_source or '').lower() in {'filtered', 'important', 'significant'}
-    boundaries: list[float] = [0.0]
-    for e in events or []:
-        if e.distance_km is None:
-            continue
-        try:
-            d = float(e.distance_km)
-        except Exception:
-            continue
-        if not math.isfinite(d) or d <= 0 or d >= float(length):
-            continue
-        important = (
-            (e.loss_db is not None and abs(float(e.loss_db)) >= float(threshold_db))
-            or (e.reflectance_db is not None)
-            or ('end' in (e.event_type or '').lower())
-            or ('reflect' in (e.event_type or '').lower())
-        )
-        if use_filtered and not important:
-            continue
-        boundaries.append(round(d, 6))
-    boundaries.append(round(float(length), 6))
-    boundaries = sorted(set(boundaries))
-    merged: list[float] = []
-    for b in boundaries:
-        if not merged or abs(b - merged[-1]) > merge_tol_km:
-            merged.append(b)
-        else:
-            # Keep the later boundary if it is the end of line, otherwise retain
-            # the earlier one to avoid creating tiny visual sections.
-            if abs(b - float(length)) <= 1e-6:
-                merged[-1] = b
-    sections: list[dict] = []
-    for i in range(len(merged) - 1):
-        st = float(merged[i]); en = float(merged[i + 1])
-        if en <= st:
-            continue
-        if min_len and (en - st) < min_len and sections:
-            sections[-1]['end_km'] = round(en, 4)
-            sections[-1]['length_km'] = round(sections[-1]['end_km'] - sections[-1]['start_km'], 4)
-            continue
-        sections.append({'index': len(sections) + 1, 'start_km': round(st, 4), 'end_km': round(en, 4), 'length_km': round(en - st, 4)})
-    if not sections:
-        sections = [{'index': 1, 'start_km': 0.0, 'end_km': round(float(length), 4), 'length_km': round(float(length), 4)}]
-    if segment_start_km is not None and segment_end_km is not None:
-        return _fr_clip_sections_to_range(sections, segment_start_km, segment_end_km)
-    return sections
-
-
-def _phase72_build_event_section_schematic(summary: FileSummary, events: list[EventRow]) -> tuple[list[float], list[float]]:
-    """Build a non-raw schematic when no usable x/y trace exists.
-
-    This is intentionally labelled as schematic in the API.  It is only for
-    visual navigation of event/section positions, not for raw-fit/R²/RMS.
-    """
-    length = _phase72_safe_float(summary.length_km or summary.end_distance_km or summary.graph_end_km, 6)
-    if length is None or length <= 0:
-        distances = [float(e.distance_km) for e in events if e.distance_km is not None]
-        length = max(distances) if distances else 1.0
-    base_att = None
-    try:
-        if summary.total_loss_db is not None and length and length > 0:
-            base_att = float(summary.total_loss_db) / float(length)
-    except Exception:
-        base_att = None
-    if base_att is None or not math.isfinite(base_att) or base_att <= 0 or base_att > 2.5:
-        base_att = float(summary.attenuation_dbkm or 0.22 or 0.22)
-        if base_att <= 0 or base_att > 2.5:
-            base_att = 0.22
-    important = sorted({0.0, float(length)} | {float(e.distance_km) for e in events if e.distance_km is not None and 0 <= float(e.distance_km) <= float(length)})
-    x_out: list[float] = []
-    y_out: list[float] = []
-    cumulative_event_loss = 0.0
-    event_loss_by_pos: dict[float, float] = {}
-    for e in events:
-        if e.distance_km is None or e.loss_db is None:
-            continue
-        try:
-            d = round(float(e.distance_km), 6)
-            loss = max(float(e.loss_db), 0.0)
-        except Exception:
-            continue
-        if 0 <= d <= float(length):
-            event_loss_by_pos[d] = event_loss_by_pos.get(d, 0.0) + loss
-    for d in important:
-        d = float(d)
-        y_before = -(base_att * d + cumulative_event_loss)
-        x_out.append(round(d, 6)); y_out.append(round(y_before, 6))
-        loss_at = event_loss_by_pos.get(round(d, 6), 0.0)
-        if loss_at > 0:
-            cumulative_event_loss += loss_at
-            x_out.append(round(d, 6)); y_out.append(round(-(base_att * d + cumulative_event_loss), 6))
-    return x_out, y_out
-
-
-

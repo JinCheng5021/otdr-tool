@@ -2,3 +2,4 @@ fastapi
 uvicorn
 python-multipart
 otdrparser
+vercel>=0.7.0
