@@ -1,5 +1,13 @@
 import React, { useState, useRef } from 'react';
 import Modals from './Modals';
+import {
+  createBatchZip,
+  downloadFromSignedUrl,
+  parseBlobConversionResponse,
+  requestBlobInput,
+  requestSignedDownload,
+  uploadBatchToBlob,
+} from './traceExport';
 
 const TraceViewer: React.FC = () => {
   // State for files
@@ -119,11 +127,28 @@ const TraceViewer: React.FC = () => {
 
   const handleConfirmExport = async (exportData: { exporterName: string; exporterUnit: string; exportRoute: string }) => {
     setIsExportModalOpen(false);
-    setStatus({ message: 'Đang xử lý...', type: 'info' });
+    setStatus({ message: 'Đang khởi tạo phiên tải tệp...', type: 'info' });
 
     try {
+      const session = await requestBlobInput();
+      setStatus({ message: 'Đang đóng gói dữ liệu...', type: 'info' });
+      const batch = await createBatchZip(
+        files,
+        session.maximum_size_in_bytes,
+        (percentage) => setStatus({
+          message: `Đang đóng gói dữ liệu... ${percentage}%`,
+          type: 'info',
+        }),
+      );
+      setStatus({ message: 'Đang tải dữ liệu lên... 0%', type: 'info' });
+      await uploadBatchToBlob(batch, session, (percentage) => setStatus({
+        message: `Đang tải dữ liệu lên... ${percentage}%`,
+        type: 'info',
+      }));
+
       const formData = new FormData();
-      files.forEach((file) => formData.append('files', file));
+      formData.append('upload_id', session.upload_id);
+      formData.append('input_pathname', session.pathname);
 
       formData.append('threshold_db', threshold);
       formData.append('section_threshold_db', sectionThreshold);
@@ -160,46 +185,17 @@ const TraceViewer: React.FC = () => {
       formData.append('stv_total_core', stvTotalCore);
       formData.append('stv_used_core', stvUsedCore);
 
-      const response = await fetch('/trace/convert', {
+      setStatus({ message: 'Đang xử lý báo cáo...', type: 'info' });
+      const response = await fetch('/trace/convert-from-blob', {
         method: 'POST',
         body: formData,
       });
+      const converted = await parseBlobConversionResponse(response);
+      setStatus({ message: 'Đang tạo liên kết tải báo cáo...', type: 'info' });
+      const signedDownload = await requestSignedDownload(converted.output_pathname);
+      downloadFromSignedUrl(signedDownload.download_url, converted.filename);
 
-      if (!response.ok) {
-        let errorMsg = 'Có lỗi xảy ra khi xử lý file.';
-        try {
-          const errJson = await response.json();
-          errorMsg = errJson.detail || errorMsg;
-        } catch (e) { }
-        throw new Error(errorMsg);
-      }
-
-      const contentType = response.headers.get('content-type');
-      let filename = 'report.xlsx';
-
-      const contentDisposition = response.headers.get('content-disposition');
-      if (contentDisposition && contentDisposition.indexOf('attachment') !== -1) {
-        const filenameRegex = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/;
-        const matches = filenameRegex.exec(contentDisposition);
-        if (matches != null && matches[1]) {
-          filename = matches[1].replace(/['"]/g, '');
-        }
-      } else if (contentType === 'application/zip') {
-        filename = 'reports.zip';
-      }
-
-      const blob = await response.blob();
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.style.display = 'none';
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      window.URL.revokeObjectURL(url);
-      document.body.removeChild(a);
-
-      setStatus({ message: `Xuất thành công: ${filename}`, type: 'success' });
+      setStatus({ message: `Xuất thành công: ${converted.filename}`, type: 'success' });
     } catch (err: any) {
       setStatus({ message: err.message, type: 'error' });
     }

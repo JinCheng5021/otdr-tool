@@ -10,9 +10,19 @@
       "config": {
         "distDir": "build"
       }
+    },
+    {
+      "src": "api/blob-upload.ts",
+      "use": "@vercel/node"
+    },
+    {
+      "src": "api/blob-signed-get.ts",
+      "use": "@vercel/node"
     }
   ],
   "routes": [
+    { "src": "/api/blob/upload", "methods": ["POST"], "dest": "/api/blob-upload.ts" },
+    { "src": "/api/blob/signed-get", "methods": ["POST"], "dest": "/api/blob-signed-get.ts" },
     { "src": "/current/(.*)", "dest": "/backend/main.py" },
     { "src": "/trace/(.*)", "dest": "/backend/main.py" },
     { "src": "/(.*)", "dest": "/frontend/$1" }
