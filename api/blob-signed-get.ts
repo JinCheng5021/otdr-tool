@@ -5,7 +5,7 @@ import {
   BlobRequestValidationError,
   SIGNED_DOWNLOAD_LIFETIME_MS,
   parseOutputPathname,
-} from '../shared/blob-paths';
+} from '../shared/blob-paths.js';
 
 export default async function handler(
   request: VercelRequest,

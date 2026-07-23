@@ -10,7 +10,7 @@ import {
   MAXIMUM_BLOB_SIZE_IN_BYTES,
   parseInputPathname,
   parseUploadClientPayload,
-} from '../shared/blob-paths';
+} from '../shared/blob-paths.js';
 
 export default async function handler(
   request: VercelRequest,
