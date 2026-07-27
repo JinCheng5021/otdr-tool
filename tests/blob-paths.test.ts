@@ -19,6 +19,15 @@ describe('managed Vercel Blob path validation', () => {
       uploadId,
       filename: 'batch.zip',
     });
+
+    const filePathname =
+      `otdr/input/2026/07/22/${uploadId}/000001-trace.sor`;
+    assert.deepEqual(parseInputPathname(filePathname), {
+      pathname: filePathname,
+      kind: 'input',
+      uploadId,
+      filename: '000001-trace.sor',
+    });
   });
 
   it('accepts only managed XLSX output paths', () => {
@@ -37,6 +46,8 @@ describe('managed Vercel Blob path validation', () => {
       `otdr/input/2026/07/22/${uploadId.toUpperCase()}/batch.zip`,
       `otdr/input/2026/07/22/${uploadId}/../batch.zip`,
       `otdr/input/2026/07/22/${uploadId}/other.zip`,
+      `otdr/input/2026/07/22/${uploadId}/trace.sor`,
+      `otdr/input/2026/07/22/${uploadId}/000001-document.pdf`,
     ];
 
     for (const pathname of invalidPaths) {

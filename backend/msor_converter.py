@@ -9,7 +9,8 @@ import struct
 import time
 import traceback
 import zlib
-from collections import Counter
+from array import array
+from collections import Counter, OrderedDict
 from copy import copy
 from dataclasses import dataclass
 from datetime import datetime
@@ -40,12 +41,37 @@ SUBHEADER_FILL = PatternFill(fill_type='solid', fgColor='EEF5FF')
 LOG_INFO_FILL = PatternFill(fill_type='solid', fgColor='EAF2FF')
 LOG_WARN_FILL = PatternFill(fill_type='solid', fgColor='FFF4CC')
 LOG_ERROR_FILL = PatternFill(fill_type='solid', fgColor='FDE9E7')
-_PARSE_CACHE: dict[str, dict] = {}
-_MSOR_SECTIONS_CACHE: dict[str, dict[str, bytes]] = {}
-_MINI_CURVE_CACHE: dict[str, Optional[list[int]]] = {}
-_CURVE_MAX_CACHE: dict[str, Optional[float]] = {}
-_TRACE_SERIES_CACHE: dict[str, Optional[dict]] = {}
-_OTDRPARSER_MSOR_CACHE: dict[str, list[dict]] = {}
+class _BoundedCache(OrderedDict):
+    """Small LRU cache so warm serverless workers cannot retain data forever."""
+
+    def __init__(self, max_items: int = 8):
+        super().__init__()
+        self.max_items = max(1, int(max_items))
+
+    def __getitem__(self, key):
+        value = super().__getitem__(key)
+        self.move_to_end(key)
+        return value
+
+    def get(self, key, default=None):
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        self.move_to_end(key)
+        while len(self) > self.max_items:
+            self.popitem(last=False)
+
+
+_MSOR_SECTIONS_CACHE: _BoundedCache = _BoundedCache()
+_MINI_CURVE_CACHE: _BoundedCache = _BoundedCache()
+_CURVE_MAX_CACHE: _BoundedCache = _BoundedCache()
+_TRACE_SERIES_CACHE: _BoundedCache = _BoundedCache()
+_OTDRPARSER_MSOR_CACHE: _BoundedCache = _BoundedCache()
+_NO_PREPARSED_SOR_META = object()
 
 
 _NOMINAL_WAVELENGTHS_NM = (1310, 1490, 1550, 1625, 1650)
@@ -72,8 +98,8 @@ def _snap_nominal_wavelength_nm(value: Optional[float], tolerance_nm: float = 8.
 
 
 
-def _fr_cache_key(file_name: str, raw: bytes) -> str:
-    return f"{Path(file_name).suffix.lower()}:{hashlib.sha1(raw).hexdigest()}"
+def _fr_cache_key(file_name: str, raw: bytes) -> tuple[str, str, str]:
+    return file_name, Path(file_name).suffix.lower(), hashlib.sha1(raw).hexdigest()
 
 
 def _fr_fast_raw_key(raw: bytes) -> str:
@@ -242,9 +268,14 @@ def _fr_validate_template_or_raise(template_path: Path, wb: Workbook) -> list[st
     return warnings
 
 
-def _fr_get_or_build_parse_bundle(file_name: str, raw: bytes, logs: list[dict]) -> dict:
+def _fr_get_or_build_parse_bundle(
+    file_name: str,
+    raw: bytes,
+    logs: list[dict],
+    parse_cache: dict[tuple[str, str, str], dict],
+) -> dict:
     key = _fr_cache_key(file_name, raw)
-    cached = _PARSE_CACHE.get(key)
+    cached = parse_cache.get(key)
     if cached is not None:
         _fr_log(logs, 'parse', 'INFO', f'Cache hit: {file_name}')
         return cached
@@ -256,7 +287,7 @@ def _fr_get_or_build_parse_bundle(file_name: str, raw: bytes, logs: list[dict]) 
     if m:
         wavelength_nm = m.group(1)
     selected_rows = _fr_pick_rows_for_file(events, wavelength_nm)
-    orl_db = _fr_extract_orl_db(file_name, raw)
+    orl_db = _fr_extract_orl_db(file_name, raw, preparsed_sor_meta=sor_meta)
     metadata = _extract_file_metadata(file_name, raw, summary, trc_trace, sor_meta)
     metadata['parser_family'] = summary.parse_family
     metadata['parser_family_confidence'] = summary.parse_family_confidence
@@ -275,7 +306,7 @@ def _fr_get_or_build_parse_bundle(file_name: str, raw: bytes, logs: list[dict]) 
         'orl_db': orl_db,
         'metadata': metadata,
     }
-    _PARSE_CACHE[key] = bundle
+    parse_cache[key] = bundle
     return bundle
 
 
@@ -1800,11 +1831,21 @@ def _detect_break_from_series_km(values: list[float], curve_max_km: Optional[flo
     start_index = max(10, int(len(smoothed) * 0.05))
 
     target_index: Optional[int] = None
-    for idx in range(start_index, len(smoothed) - stable_count):
-        window = smoothed[idx: idx + stable_count]
-        if sum(value <= threshold for value in window) >= max(stable_count - 2, 1):
-            target_index = idx
-            break
+    stop_index = len(smoothed) - stable_count
+    if start_index < stop_index:
+        required_count = max(stable_count - 2, 1)
+        below_count = sum(
+            value <= threshold
+            for value in smoothed[start_index:start_index + stable_count]
+        )
+        for idx in range(start_index, stop_index):
+            if below_count >= required_count:
+                target_index = idx
+                break
+            next_index = idx + stable_count
+            if next_index < len(smoothed):
+                below_count -= int(smoothed[idx] <= threshold)
+                below_count += int(smoothed[next_index] <= threshold)
 
     if target_index is None:
         diffs = [smoothed[i] - smoothed[i - 1] for i in range(1, len(smoothed))]
@@ -1843,10 +1884,14 @@ def _parse_standard_sor_datapts(raw: bytes, map_info: dict, fxd: Optional[dict])
         if sample_count <= 0:
             return None
 
-        vals = list(struct.unpack('<' + 'H' * sample_count, raw[pos: pos + sample_count * 2]))
+        sample_bytes = memoryview(raw)[pos: pos + sample_count * 2]
+        vals = array(
+            'H',
+            (item[0] for item in struct.iter_unpack('<H', sample_bytes)),
+        )
         ymax = max(vals)
         fs = 0.001 * scaling_factor
-        trace_db = [(ymax - x) * fs for x in vals]
+        trace_db = array('d', ((ymax - x) * fs for x in vals))
 
         graph_end_km = _detect_break_from_series_km(trace_db, fxd.get('range_km'))
         range_km = float(fxd.get('range_km') or 0.0)
@@ -4538,7 +4583,11 @@ def _extract_msor_xml_orl_db(raw: bytes) -> Optional[float]:
         return round(v, 3)
     return None
 
-def _fr_extract_orl_db(file_name: str, raw: bytes) -> Optional[float]:
+def _fr_extract_orl_db(
+    file_name: str,
+    raw: bytes,
+    preparsed_sor_meta=_NO_PREPARSED_SOR_META,
+) -> Optional[float]:
     ext = Path(file_name).suffix.lower()
     try:
         if ext == '.msor':
@@ -4554,7 +4603,10 @@ def _fr_extract_orl_db(file_name: str, raw: bytes) -> Optional[float]:
             return None
         if ext == '.sor':
             # 1) Standard Bellcore KeyEvents tail, when populated
-            rows, meta = _parse_standard_sor_events_with_meta(file_name, raw)
+            if preparsed_sor_meta is _NO_PREPARSED_SOR_META:
+                _rows, meta = _parse_standard_sor_events_with_meta(file_name, raw)
+            else:
+                meta = preparsed_sor_meta if isinstance(preparsed_sor_meta, dict) else None
             if meta and meta.get('orl_db') not in (None, 0):
                 return meta.get('orl_db')
             # 2) Vendor-specific extension blocks / embedded text
@@ -4615,7 +4667,11 @@ def _fr_status_for_measured_orl(value: Optional[float], threshold_db: float) -> 
         return 'Unknown'
 
 
-def _fr_extract_measured_orl_candidate(file_name: str, raw: bytes) -> Optional[dict]:
+def _fr_extract_measured_orl_candidate(
+    file_name: str,
+    raw: bytes,
+    preparsed_sor_meta=_NO_PREPARSED_SOR_META,
+) -> Optional[dict]:
     """Return an exact/measured ORL candidate with provenance.
 
     Phase 6 keeps this intentionally conservative: only explicitly labelled or
@@ -4655,7 +4711,10 @@ def _fr_extract_measured_orl_candidate(file_name: str, raw: bytes) -> Optional[d
                 }
             return None
         if ext == '.sor':
-            rows, meta = _parse_standard_sor_events_with_meta(file_name, raw)
+            if preparsed_sor_meta is _NO_PREPARSED_SOR_META:
+                _rows, meta = _parse_standard_sor_events_with_meta(file_name, raw)
+            else:
+                meta = preparsed_sor_meta if isinstance(preparsed_sor_meta, dict) else None
             if meta and _fr_is_sane_orl_value(meta.get('orl_db')):
                 return {
                     'value_db': _fr_round_orl(meta.get('orl_db')),
@@ -4747,6 +4806,7 @@ def _fr_analyze_orl(
     summary: FileSummary,
     ctx: Optional[dict],
     *,
+    preparsed_sor_meta=_NO_PREPARSED_SOR_META,
     orl_pass_threshold_db: float = 28.0,
     orl_source_mode: str = 'auto',
     orl_allow_lower_bound: bool = True,
@@ -4759,7 +4819,11 @@ def _fr_analyze_orl(
     lower_value = None
     if metadata:
         lower_value = _fr_round_orl(metadata.get('reflection_threshold_db'))
-    measured = _fr_extract_measured_orl_candidate(file_name, raw)
+    measured = _fr_extract_measured_orl_candidate(
+        file_name,
+        raw,
+        preparsed_sor_meta=preparsed_sor_meta,
+    )
     has_measured = measured is not None and _fr_is_sane_orl_value(measured.get('value_db'))
     # Conditional phase-6 behavior: physical ORL trace diagnostics are only useful
     # when the file is missing a measured/exact ORL.  If measured ORL exists, do
@@ -4895,20 +4959,25 @@ def _fr_build_context(
     skipped: list[str] = []
     file_payload_map = {}
     contexts: dict[str, dict] = {}
+    request_parse_cache: dict[tuple[str, str, str], dict] = {}
     start_time = time.monotonic()
     for file_name, raw in files:
         if max_seconds is not None and (time.monotonic() - start_time) >= float(max_seconds):
             skipped.append(f'Trace preview timeout: đã dừng sau {int(max_seconds)} giây, các file còn lại chưa dựng đồ thị')
             _fr_log(logs, 'trace-preview', 'WARN', f'Dừng dựng đồ thị sau {int(max_seconds)} giây để tránh chờ quá lâu.')
             break
-        file_payload_map[file_name] = raw
         ext = Path(file_name).suffix.lower()
         if ext not in ALLOWED_EXTENSIONS:
             skipped.append(f'{file_name}: định dạng không hỗ trợ')
             _fr_log(logs, 'parse', 'WARN', f'Bỏ qua {file_name}: định dạng không hỗ trợ')
             continue
         try:
-            bundle = _fr_get_or_build_parse_bundle(file_name, raw, logs)
+            bundle = _fr_get_or_build_parse_bundle(
+                file_name,
+                raw,
+                logs,
+                request_parse_cache,
+            )
             summary = bundle['summary']
             summaries.append(summary)
             metadata = bundle.get('metadata') or {}
@@ -4926,6 +4995,7 @@ def _fr_build_context(
                 metadata,
                 summary,
                 ctx,
+                preparsed_sor_meta=bundle.get('sor_meta'),
                 orl_pass_threshold_db=orl_pass_threshold_db,
                 orl_source_mode=orl_source_mode,
                 orl_allow_lower_bound=orl_allow_lower_bound,
@@ -5345,7 +5415,7 @@ def _linear_fit_xy(x: list[float], y: list[float]) -> Optional[dict]:
     }
 
 
-def _series_from_uniform_samples(values: list[float], range_km: Optional[float]) -> tuple[list[float], list[float]]:
+def _series_from_uniform_samples(values: Iterable[float], range_km: Optional[float]) -> tuple[array, array]:
     if not values or range_km in (None, 0):
         return [], []
     try:
@@ -5356,10 +5426,14 @@ def _series_from_uniform_samples(values: list[float], range_km: Optional[float])
         return [], []
     count = len(values)
     if count < 8:
-        return [], []
+        return array('d'), array('d')
     denom = max(count - 1, 1)
-    x = [(i / denom) * range_f for i in range(count)]
-    y = [float(v) for v in values]
+    x = array('d', ((i / denom) * range_f for i in range(count)))
+    y = (
+        values
+        if isinstance(values, array) and values.typecode == 'd'
+        else array('d', (float(v) for v in values))
+    )
     return x, y
 
 
@@ -5379,7 +5453,7 @@ def _raw_trace_reference_span_km(summary: FileSummary) -> Optional[float]:
     return None
 
 
-def _normalize_raw_trace_distance_axis(x: list[float], summary: FileSummary) -> tuple[list[float], dict]:
+def _normalize_raw_trace_distance_axis(x: Iterable[float], summary: FileSummary) -> tuple[Iterable[float], dict]:
     """Normalize vendor raw-trace x-axis to one-way span kilometres when detectable.
 
     Some MSOR/Acterna MiniCurve blocks expose an x-axis that represents the
@@ -5401,7 +5475,11 @@ def _normalize_raw_trace_distance_axis(x: list[float], summary: FileSummary) -> 
     if not x:
         return x, meta
     try:
-        x_float = [float(v) for v in x]
+        x_float = (
+            x
+            if isinstance(x, array) and x.typecode == 'd'
+            else array('d', (float(v) for v in x))
+        )
         raw_last = max(x_float)
     except Exception:
         meta['distance_scale_status'] = 'Lỗi trục km'
@@ -5437,7 +5515,7 @@ def _normalize_raw_trace_distance_axis(x: list[float], summary: FileSummary) -> 
     # Strong two-way signature: correct raw axis back to the one-way span.
     if 1.80 <= ratio <= 2.20:
         factor = float(ref) / raw_last
-        x_scaled = [v * factor for v in x_float]
+        x_scaled = array('d', (v * factor for v in x_float))
         meta.update({
             'raw_last_after_km': round(max(x_scaled), 6),
             'distance_scale_factor': round(factor, 8),
@@ -5518,18 +5596,21 @@ def _extract_raw_trace_series(
         return cached
     try:
         if ext == '.sor' and sor_meta and sor_meta.get('trace_values_db'):
-            vals = [float(v) for v in sor_meta.get('trace_values_db')]
+            trace_values = sor_meta.get('trace_values_db')
             range_km = sor_meta.get('trace_range_km') or sor_meta.get('graph_curve_max_km') or summary.length_km
-            x, y = _series_from_uniform_samples(vals, range_km)
+            x, y = _series_from_uniform_samples(trace_values, range_km)
             if x and y:
                 x, dist_meta = _normalize_raw_trace_distance_axis(x, summary)
+                trace_point_count = len(trace_values)
+                sor_meta['trace_values_db_count'] = trace_point_count
+                sor_meta.pop('trace_values_db', None)
                 return {
                     'x_km': x,
                     'y_db': y,
                     'source': sor_meta.get('trace_source') or 'SOR DataPts',
                     'calibrated_db': bool(sor_meta.get('trace_calibrated_db', True)),
                     'calibration_note': 'DataPts đã có scaling dB từ file SOR',
-                    'raw_points_total': len(x),
+                    'raw_points_total': trace_point_count,
                     **dist_meta,
                 }
 
@@ -8477,10 +8558,15 @@ def _raw_trace_candidate_diagnostics(summary: FileSummary, ctx: dict) -> dict:
 
     try:
         if ext == '.sor':
-            if sor_meta.get('trace_values_db'):
+            trace_values = sor_meta.get('trace_values_db')
+            trace_point_count = int(
+                sor_meta.get('trace_values_db_count')
+                or (len(trace_values) if trace_values else 0)
+            )
+            if trace_point_count:
                 candidate_found = True
                 candidate_source = sor_meta.get('trace_source') or 'SOR DataPts'
-                candidate_points = len(sor_meta.get('trace_values_db') or [])
+                candidate_points = trace_point_count
                 candidate_note = 'SOR parser đọc được trace_values_db từ DataPts.'
             elif sor_meta:
                 candidate_note = 'SOR metadata đọc được nhưng chưa có trace_values_db/DataPts dùng được.'
@@ -9490,7 +9576,6 @@ def build_workbook_from_uploads(
     t0 = time.perf_counter()
     logs: list[dict] = []
     _fr_log(logs, 'run', 'INFO', 'Bắt đầu dựng workbook.')
-    files = list(files)
     summaries, skipped, _file_payload_map, contexts = _fr_build_context(
         files,
         threshold_db=threshold_db,

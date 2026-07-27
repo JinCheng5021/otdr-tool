@@ -15,7 +15,17 @@ from .blob_storage import StoredBlob
 
 
 UPLOAD_ID = "123e4567-e89b-12d3-a456-426614174000"
-INPUT_PATH = f"otdr/input/2026/07/22/{UPLOAD_ID}/batch.zip"
+INPUT_PATH = f"otdr/input/2026/07/22/{UPLOAD_ID}/000001-trace.sor"
+INPUT_BYTES = b"SOR-DATA"
+INPUT_MANIFEST = json.dumps(
+    [
+        {
+            "original_name": "trace.sor",
+            "pathname": INPUT_PATH,
+            "size": len(INPUT_BYTES),
+        }
+    ]
+)
 
 CONVERT_OPTIONS = {
     "threshold_db": 0.11,
@@ -57,6 +67,7 @@ class FakeBlobStorage:
 
     def __init__(self) -> None:
         self.upload_call = None
+        self.deleted_paths = []
         self.closed = False
         self.__class__.instances.append(self)
 
@@ -66,10 +77,18 @@ class FakeBlobStorage:
     def __exit__(self, *args: object) -> None:
         self.closed = True
 
-    def download_bytes(self, pathname: str) -> bytes:
+    def download_bytes(
+        self,
+        pathname: str,
+        *,
+        max_bytes: int,
+        expected_size: int,
+    ) -> bytes:
         if pathname != INPUT_PATH:
             raise AssertionError(f"unexpected input path: {pathname}")
-        return b"BATCH-ZIP"
+        if max_bytes != len(INPUT_BYTES) or expected_size != len(INPUT_BYTES):
+            raise AssertionError("manifest size was not enforced")
+        return INPUT_BYTES
 
     def upload_bytes(
         self,
@@ -88,6 +107,20 @@ class FakeBlobStorage:
             size=len(content),
         )
 
+    def metadata(self, pathname: str) -> StoredBlob:
+        if self.upload_call is None or pathname != self.upload_call[0]:
+            raise AssertionError(f"unexpected metadata path: {pathname}")
+        return StoredBlob(
+            pathname=pathname,
+            url="https://private.example/output",
+            download_url="https://private.example/output?download=1",
+            content_type=app_trace.XLSX_CONTENT_TYPE,
+            size=len(self.upload_call[1]),
+        )
+
+    def delete(self, pathname: str) -> None:
+        self.deleted_paths.append(pathname)
+
 
 class ConvertFromBlobTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
@@ -96,9 +129,9 @@ class ConvertFromBlobTests(unittest.IsolatedAsyncioTestCase):
     async def test_transport_passes_the_exact_existing_parameters_to_convert(self) -> None:
         captured = {}
 
-        async def fake_convert(**kwargs):
+        def fake_build(payload, **kwargs):
             captured.update(kwargs)
-            self.assertEqual(await kwargs["files"][0].read(), b"BATCH-ZIP")
+            self.assertEqual(list(payload), [("trace.sor", INPUT_BYTES)])
             return Response(
                 content=b"XLSX-DATA",
                 media_type=app_trace.XLSX_CONTENT_TYPE,
@@ -109,18 +142,27 @@ class ConvertFromBlobTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(app_trace, "PrivateBlobStorage", FakeBlobStorage),
-            patch.object(app_trace, "convert", side_effect=fake_convert) as convert_mock,
+            patch.object(
+                app_trace,
+                "_build_export_response",
+                side_effect=fake_build,
+            ) as build_mock,
+            patch.object(app_trace, "_record_export_history") as history_mock,
         ):
             response = await app_trace.convert_from_blob(
                 upload_id=UPLOAD_ID,
-                input_pathname=INPUT_PATH,
+                input_manifest=INPUT_MANIFEST,
                 **CONVERT_OPTIONS,
             )
 
-        convert_mock.assert_awaited_once()
-        files = captured.pop("files")
-        self.assertEqual(len(files), 1)
-        self.assertEqual(captured, CONVERT_OPTIONS)
+        build_mock.assert_called_once()
+        expected_build_options = {
+            key: value
+            for key, value in CONVERT_OPTIONS.items()
+            if key not in {"exporter_name", "unit", "route_name"}
+        }
+        self.assertEqual(captured, expected_build_options)
+        history_mock.assert_called_once_with("Tester", "QA", "Route 01")
 
         storage = FakeBlobStorage.instances[0]
         self.assertTrue(storage.closed)
@@ -130,6 +172,7 @@ class ConvertFromBlobTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(content, b"XLSX-DATA")
         self.assertEqual(content_type, app_trace.XLSX_CONTENT_TYPE)
         self.assertFalse(overwrite)
+        self.assertEqual(storage.deleted_paths, [INPUT_PATH])
 
         payload = json.loads(response.body)
         self.assertEqual(payload["upload_id"], UPLOAD_ID)
@@ -138,17 +181,17 @@ class ConvertFromBlobTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["output_pathname"], output_path)
 
     async def test_converter_value_error_is_not_reclassified_as_uuid_error(self) -> None:
-        async def failing_convert(**kwargs):
+        def failing_build(payload, **kwargs):
             raise ValueError("converter failure")
 
         with (
             patch.object(app_trace, "PrivateBlobStorage", FakeBlobStorage),
-            patch.object(app_trace, "convert", side_effect=failing_convert),
+            patch.object(app_trace, "_build_export_response", side_effect=failing_build),
         ):
             with self.assertRaisesRegex(ValueError, "converter failure"):
                 await app_trace.convert_from_blob(
                     upload_id=UPLOAD_ID,
-                    input_pathname=INPUT_PATH,
+                    input_manifest=INPUT_MANIFEST,
                     **CONVERT_OPTIONS,
                 )
 
@@ -158,12 +201,72 @@ class ConvertFromBlobTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(app_trace.HTTPException) as raised:
                 await app_trace.convert_from_blob(
                     upload_id=other_id,
-                    input_pathname=INPUT_PATH,
+                    input_manifest=INPUT_MANIFEST,
                     **CONVERT_OPTIONS,
                 )
 
         self.assertEqual(raised.exception.status_code, 400)
         self.assertEqual(FakeBlobStorage.instances, [])
+
+    async def test_mixed_supported_types_are_rejected_before_blob_access(self) -> None:
+        mixed_manifest = json.dumps(
+            [
+                {
+                    "original_name": "trace.sor",
+                    "pathname": INPUT_PATH,
+                    "size": len(INPUT_BYTES),
+                },
+                {
+                    "original_name": "trace.msor",
+                    "pathname": (
+                        f"otdr/input/2026/07/22/{UPLOAD_ID}/"
+                        "000002-trace.msor"
+                    ),
+                    "size": 10,
+                },
+            ]
+        )
+        with patch.object(app_trace, "PrivateBlobStorage", FakeBlobStorage):
+            with self.assertRaises(app_trace.HTTPException) as raised:
+                await app_trace.convert_from_blob(
+                    upload_id=UPLOAD_ID,
+                    input_manifest=mixed_manifest,
+                    **CONVERT_OPTIONS,
+                )
+
+        self.assertEqual(raised.exception.status_code, 400)
+        self.assertEqual(FakeBlobStorage.instances, [])
+
+
+class FakeJsonRequest:
+    def __init__(self, body) -> None:
+        self.body = body
+
+    async def json(self):
+        return self.body
+
+
+class BlobInputSessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_session_selects_one_type_and_ignores_other_files(self) -> None:
+        response = await app_trace.create_blob_input(
+            FakeJsonRequest(
+                {
+                    "files": [
+                        {"name": "document.pdf", "size": 100},
+                        {"name": "trace.msor", "size": 200},
+                        {"name": "trace.sor", "size": 300},
+                    ]
+                }
+            )
+        )
+        payload = json.loads(response.body)
+
+        self.assertEqual(payload["selected_extension"], ".sor")
+        self.assertEqual(payload["ignored_count"], 2)
+        self.assertEqual(len(payload["files"]), 1)
+        self.assertEqual(payload["files"][0]["original_name"], "trace.sor")
+        self.assertEqual(payload["files"][0]["size"], 300)
+        self.assertTrue(payload["files"][0]["pathname"].endswith("000001-trace.sor"))
 
 
 class ConvertContractTests(unittest.TestCase):
@@ -174,7 +277,7 @@ class ConvertContractTests(unittest.TestCase):
         from_blob_names = [
             name
             for name in from_blob
-            if name not in {"upload_id", "input_pathname"}
+            if name not in {"upload_id", "input_manifest", "input_pathname"}
         ]
         self.assertEqual(from_blob_names, original_names)
 

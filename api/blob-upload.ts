@@ -45,7 +45,11 @@ export default async function handler(
         }
 
         return {
-          allowedContentTypes: ['application/zip'],
+          allowedContentTypes: [
+            parsedPath.filename === 'batch.zip'
+              ? 'application/zip'
+              : 'application/octet-stream',
+          ],
           maximumSizeInBytes: MAXIMUM_BLOB_SIZE_IN_BYTES,
           validUntil: Date.now() + CLIENT_UPLOAD_TOKEN_LIFETIME_MS,
           addRandomSuffix: false,

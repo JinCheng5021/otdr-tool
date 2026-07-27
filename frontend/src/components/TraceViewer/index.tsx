@@ -1,13 +1,16 @@
 import React, { useState, useRef } from 'react';
 import Modals from './Modals';
 import {
-  createBatchZip,
+  type BlobConversionResult,
   downloadFromSignedUrl,
   parseBlobConversionResponse,
   requestBlobInput,
   requestSignedDownload,
-  uploadBatchToBlob,
+  selectInputFiles,
+  uploadFilesToBlob,
 } from './traceExport';
+
+const REPORT_PROCESSING_TIMEOUT_MS = 180 * 1000;
 
 const TraceViewer: React.FC = () => {
   // State for files
@@ -17,6 +20,8 @@ const TraceViewer: React.FC = () => {
 
   // Status message
   const [status, setStatus] = useState<{ message: string; type: 'error' | 'success' | 'info' } | null>(null);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [readyReport, setReadyReport] = useState<BlobConversionResult | null>(null);
 
   // Settings Tabs
   const [activeTab, setActiveTab] = useState<'basic' | 'advanced'>('basic');
@@ -93,31 +98,54 @@ const TraceViewer: React.FC = () => {
     setIsDragging(false);
   };
 
+  const addFiles = (incomingFiles: File[]) => {
+    if (incomingFiles.length === 0) return;
+    try {
+      const selection = selectInputFiles([...files, ...incomingFiles]);
+      setFiles(selection.selectedFiles);
+      setReadyReport(null);
+      setStatus({
+        message: selection.ignoredFiles.length > 0
+          ? `Đã chọn ${selection.selectedFiles.length} file ${selection.selectedExtension}; bỏ qua ${selection.ignoredFiles.length} file khác định dạng.`
+          : `Đã chọn ${selection.selectedFiles.length} file ${selection.selectedExtension}.`,
+        type: 'info',
+      });
+    } catch (error) {
+      setStatus({
+        message: error instanceof Error ? error.message : 'Danh sách file không hợp lệ.',
+        type: 'error',
+      });
+    }
+  };
+
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
     if (e.dataTransfer.files) {
-      const newFiles = Array.from(e.dataTransfer.files);
-      setFiles((prev) => [...prev, ...newFiles]);
+      addFiles(Array.from(e.dataTransfer.files));
     }
   };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
-      const newFiles = Array.from(e.target.files);
-      setFiles((prev) => [...prev, ...newFiles]);
+      addFiles(Array.from(e.target.files));
+      e.target.value = '';
     }
   };
 
   const removeFile = (index: number) => {
     setFiles((prev) => prev.filter((_, i) => i !== index));
+    setReadyReport(null);
   };
 
   const clearFiles = () => {
     setFiles([]);
+    setReadyReport(null);
+    setStatus(null);
   };
 
   const handleExportClick = () => {
+    if (isProcessing) return;
     if (files.length === 0) {
       setStatus({ message: 'Vui lòng chọn ít nhất 1 file để xuất báo cáo.', type: 'error' });
       return;
@@ -127,28 +155,23 @@ const TraceViewer: React.FC = () => {
 
   const handleConfirmExport = async (exportData: { exporterName: string; exporterUnit: string; exportRoute: string }) => {
     setIsExportModalOpen(false);
+    setIsProcessing(true);
+    setReadyReport(null);
     setStatus({ message: 'Đang khởi tạo phiên tải tệp...', type: 'info' });
 
     try {
-      const session = await requestBlobInput();
-      setStatus({ message: 'Đang đóng gói dữ liệu...', type: 'info' });
-      const batch = await createBatchZip(
-        files,
-        session.maximum_size_in_bytes,
-        (percentage) => setStatus({
-          message: `Đang đóng gói dữ liệu... ${percentage}%`,
-          type: 'info',
-        }),
-      );
+      const selection = selectInputFiles(files);
+      const selectedFiles = selection.selectedFiles;
+      const session = await requestBlobInput(selectedFiles);
       setStatus({ message: 'Đang tải dữ liệu lên... 0%', type: 'info' });
-      await uploadBatchToBlob(batch, session, (percentage) => setStatus({
+      await uploadFilesToBlob(selectedFiles, session, (percentage) => setStatus({
         message: `Đang tải dữ liệu lên... ${percentage}%`,
         type: 'info',
       }));
 
       const formData = new FormData();
       formData.append('upload_id', session.upload_id);
-      formData.append('input_pathname', session.pathname);
+      formData.append('input_manifest', JSON.stringify(session.files));
 
       formData.append('threshold_db', threshold);
       formData.append('section_threshold_db', sectionThreshold);
@@ -186,18 +209,80 @@ const TraceViewer: React.FC = () => {
       formData.append('stv_used_core', stvUsedCore);
 
       setStatus({ message: 'Đang xử lý báo cáo...', type: 'info' });
-      const response = await fetch('/trace/convert-from-blob', {
-        method: 'POST',
-        body: formData,
-      });
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(
+        () => controller.abort(),
+        REPORT_PROCESSING_TIMEOUT_MS,
+      );
+      let response: Response;
+      try {
+        response = await fetch('/trace/convert-from-blob', {
+          method: 'POST',
+          body: formData,
+          signal: controller.signal,
+        });
+      } catch (error) {
+        if (error instanceof Error && error.name === 'AbortError') {
+          throw new Error(
+            'Quá thời gian xử lý 3 phút. Báo cáo chưa được đánh dấu thành công.',
+          );
+        }
+        throw error;
+      } finally {
+        window.clearTimeout(timeoutId);
+      }
       const converted = await parseBlobConversionResponse(response);
-      setStatus({ message: 'Đang tạo liên kết tải báo cáo...', type: 'info' });
-      const signedDownload = await requestSignedDownload(converted.output_pathname);
-      downloadFromSignedUrl(signedDownload.download_url, converted.filename);
-
-      setStatus({ message: `Xuất thành công: ${converted.filename}`, type: 'success' });
+      setReadyReport(converted);
+      setStatus({ message: 'Đang tự động tải báo cáo...', type: 'info' });
+      try {
+        const signedDownload = await requestSignedDownload(
+          converted.output_pathname,
+        );
+        downloadFromSignedUrl(
+          signedDownload.download_url,
+          converted.filename,
+        );
+        setStatus({
+          message: `Đã gửi yêu cầu tải tự động ${converted.filename} tới trình duyệt. Nếu chưa thấy file, nhấn “Tải báo cáo”.`,
+          type: 'success',
+        });
+      } catch (downloadError) {
+        setStatus({
+          message: downloadError instanceof Error
+            ? `Báo cáo đã sẵn sàng nhưng chưa thể tải tự động: ${downloadError.message} Nhấn “Tải báo cáo” để thử lại.`
+            : 'Báo cáo đã sẵn sàng nhưng chưa thể tải tự động. Nhấn “Tải báo cáo” để thử lại.',
+          type: 'error',
+        });
+      }
     } catch (err: any) {
-      setStatus({ message: err.message, type: 'error' });
+      setStatus({
+        message: err instanceof Error ? err.message : 'Có lỗi xảy ra khi xử lý file.',
+        type: 'error',
+      });
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const handleDownloadReadyReport = async () => {
+    if (!readyReport) return;
+    setStatus({ message: 'Đang tạo liên kết tải báo cáo...', type: 'info' });
+    try {
+      const signedDownload = await requestSignedDownload(
+        readyReport.output_pathname,
+      );
+      downloadFromSignedUrl(signedDownload.download_url, readyReport.filename);
+      setStatus({
+        message: `Đã gửi yêu cầu tải ${readyReport.filename} tới trình duyệt.`,
+        type: 'success',
+      });
+    } catch (error) {
+      setStatus({
+        message: error instanceof Error
+          ? error.message
+          : 'Không thể tạo liên kết tải báo cáo.',
+        type: 'error',
+      });
     }
   };
 
@@ -216,7 +301,14 @@ const TraceViewer: React.FC = () => {
           onDrop={handleDrop}
           onClick={() => fileInputRef.current?.click()}
         >
-          <input type="file" ref={fileInputRef} multiple style={{ display: 'none' }} onChange={handleFileSelect} />
+          <input
+            type="file"
+            ref={fileInputRef}
+            multiple
+            accept=".sor,.msor,.trc"
+            style={{ display: 'none' }}
+            onChange={handleFileSelect}
+          />
           <div className="absolute inset-0 shimmer-effect opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"></div>
           <div className="bg-white p-5 rounded-2xl shadow-sm border border-outline-variant group-hover:border-primary/50 group-hover:scale-110 transition-all duration-500 z-10">
             <span className="material-symbols-outlined text-[40px] text-primary">cloud_upload</span>
@@ -253,6 +345,15 @@ const TraceViewer: React.FC = () => {
           <div className={`mt-4 p-4 rounded-xl text-sm font-medium ${status.type === 'error' ? 'bg-error-container text-on-error-container border border-error/20' : status.type === 'success' ? 'bg-green-100 text-green-800 border border-green-200' : 'bg-blue-100 text-blue-800 border border-blue-200'}`}>
             {status.message}
           </div>
+        )}
+        {readyReport && (
+          <button
+            type="button"
+            onClick={handleDownloadReadyReport}
+            className="mt-3 px-5 py-3 rounded-xl bg-primary text-white font-bold hover:bg-industrial-navy transition-colors"
+          >
+            Tải báo cáo
+          </button>
         )}
       </section>
 
@@ -550,11 +651,14 @@ const TraceViewer: React.FC = () => {
       <section className="opacity-0 animate-fade-up stagger-4" style={{ animationFillMode: 'forwards' }}>
         <button
           onClick={handleExportClick}
-          className="group w-full h-20 bg-industrial-navy hover:bg-primary text-white rounded-2xl font-headline-md text-[20px] flex items-center justify-center gap-4 transition-all active:scale-[0.98] shadow-xl shadow-primary/20 btn-pro relative overflow-hidden"
+          disabled={isProcessing}
+          className="group w-full h-20 bg-industrial-navy hover:bg-primary disabled:opacity-60 disabled:cursor-not-allowed text-white rounded-2xl font-headline-md text-[20px] flex items-center justify-center gap-4 transition-all active:scale-[0.98] shadow-xl shadow-primary/20 btn-pro relative overflow-hidden"
         >
           <div className="absolute inset-0 shimmer-effect opacity-20 pointer-events-none"></div>
           <span className="material-symbols-outlined text-[32px]">table_view</span>
-          <span className="tracking-tight">XUẤT BÁO CÁO EXCEL</span>
+          <span className="tracking-tight">
+            {isProcessing ? 'ĐANG XỬ LÝ BÁO CÁO' : 'XUẤT BÁO CÁO EXCEL'}
+          </span>
           <span className="material-symbols-outlined text-[20px] opacity-0 group-hover:opacity-100 group-hover:translate-x-2 transition-all">arrow_forward</span>
         </button>
         <div className="flex items-center justify-center gap-2 mt-4 text-on-surface-variant">

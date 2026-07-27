@@ -1,0 +1,155 @@
+from __future__ import annotations
+
+from array import array
+from statistics import median
+from types import SimpleNamespace
+from typing import Optional
+import unittest
+from unittest.mock import patch
+
+from . import msor_converter as converter
+
+
+def _reference_detect_break_from_series_km(
+    values: list[float],
+    curve_max_km: Optional[float],
+    radius: int = 8,
+) -> Optional[float]:
+    """Original detector kept here as an output-equivalence oracle."""
+    if curve_max_km is None or not values or len(values) < 80:
+        return None
+
+    smoothed = converter._moving_average([float(v) for v in values], radius=radius)
+    tail = smoothed[int(len(smoothed) * 0.88):]
+    pre = smoothed[:max(30, int(len(smoothed) * 0.60))]
+    if not tail or not pre:
+        return None
+
+    floor = median(tail)
+    plateau = converter._percentile(pre, 90)
+    dynamic = plateau - floor
+    if dynamic <= 0:
+        plateau = max(pre)
+        dynamic = plateau - floor
+    if dynamic <= 0:
+        return None
+
+    threshold = floor + 0.18 * dynamic
+    stable_count = max(16, int(len(smoothed) * 0.01))
+    start_index = max(10, int(len(smoothed) * 0.05))
+
+    target_index = None
+    for idx in range(start_index, len(smoothed) - stable_count):
+        window = smoothed[idx:idx + stable_count]
+        if sum(value <= threshold for value in window) >= max(stable_count - 2, 1):
+            target_index = idx
+            break
+
+    if target_index is None:
+        diffs = [smoothed[i] - smoothed[i - 1] for i in range(1, len(smoothed))]
+        search_from = max(1, int(len(diffs) * 0.20))
+        target_index = min(range(search_from, len(diffs)), key=lambda i: diffs[i])
+
+    break_km = (target_index / max(len(smoothed) - 1, 1)) * curve_max_km
+    return round(break_km + 1e-12, 3)
+
+
+class BreakDetectorOptimizationTests(unittest.TestCase):
+    def test_rolling_detector_matches_original_detector(self) -> None:
+        series_cases = [
+            [5.0] * 120,
+            [80.0] * 90 + [0.0] * 110,
+            [80.0] * 90 + [0.0, 0.0, 40.0, 0.0] + [0.0] * 106,
+            [100.0 - (index * 0.2) for index in range(240)],
+            [
+                55.0 if index < 130 else (2.0 if index % 11 else 24.0)
+                for index in range(300)
+            ],
+        ]
+
+        for values in series_cases:
+            with self.subTest(points=len(values), tail=values[-5:]):
+                self.assertEqual(
+                    converter._detect_break_from_series_km(values, 42.5),
+                    _reference_detect_break_from_series_km(values, 42.5),
+                )
+
+
+class CacheSafetyTests(unittest.TestCase):
+    def test_bounded_cache_evicts_least_recently_used_item(self) -> None:
+        cache = converter._BoundedCache(max_items=2)
+        cache["a"] = 1
+        cache["b"] = 2
+        self.assertEqual(cache["a"], 1)
+
+        cache["c"] = 3
+
+        self.assertEqual(list(cache.keys()), ["a", "c"])
+        self.assertNotIn("b", cache)
+
+    def test_parse_cache_key_keeps_file_name_identity(self) -> None:
+        raw = b"same content"
+        self.assertNotEqual(
+            converter._fr_cache_key("trace-a.sor", raw),
+            converter._fr_cache_key("trace-b.sor", raw),
+        )
+
+
+class SorParseReuseTests(unittest.TestCase):
+    def test_orl_extractors_use_preparsed_sor_metadata(self) -> None:
+        meta = {"orl_db": 31.25}
+        with patch.object(
+            converter,
+            "_parse_standard_sor_events_with_meta",
+            side_effect=AssertionError("SOR must not be parsed again"),
+        ):
+            self.assertEqual(
+                converter._fr_extract_orl_db(
+                    "trace.sor",
+                    b"not needed",
+                    preparsed_sor_meta=meta,
+                ),
+                31.25,
+            )
+            candidate = converter._fr_extract_measured_orl_candidate(
+                "trace.sor",
+                b"not needed",
+                preparsed_sor_meta=meta,
+            )
+
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate["value_db"], 31.25)
+        self.assertEqual(candidate["source_kind"], "measured_orl")
+
+    def test_sor_trace_series_compacts_duplicate_sample_storage(self) -> None:
+        values = [float(index) / 10.0 for index in range(100)]
+        meta = {
+            "trace_values_db": values,
+            "trace_range_km": 1.0,
+            "trace_calibrated_db": True,
+            "trace_source": "SOR DataPts",
+        }
+        summary = SimpleNamespace(
+            length_km=1.0,
+            end_distance_km=1.0,
+            graph_end_km=1.0,
+        )
+
+        series = converter._extract_raw_trace_series(
+            "trace.sor",
+            b"trace",
+            summary,
+            None,
+            meta,
+        )
+
+        self.assertIsNotNone(series)
+        self.assertIsInstance(series["x_km"], array)
+        self.assertIsInstance(series["y_db"], array)
+        self.assertEqual(list(series["y_db"]), values)
+        self.assertEqual(meta["trace_values_db_count"], len(values))
+        self.assertNotIn("trace_values_db", meta)
+
+
+if __name__ == "__main__":
+    unittest.main()

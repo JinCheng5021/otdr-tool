@@ -16,7 +16,12 @@ from vercel.blob.errors import BlobError, BlobNotFoundError
 INPUT_PREFIX: Final[str] = "otdr/input"
 OUTPUT_PREFIX: Final[str] = "otdr/output"
 DEFAULT_MAX_DOWNLOAD_BYTES: Final[int] = 250 * 1024 * 1024
+SUPPORTED_INPUT_EXTENSIONS: Final[tuple[str, ...]] = (".sor", ".msor", ".trc")
 _SAFE_FILENAME_RE: Final[re.Pattern[str]] = re.compile(r"[^A-Za-z0-9._-]+")
+_MANAGED_INPUT_FILENAME_RE: Final[re.Pattern[str]] = re.compile(
+    r"^\d{6}-[A-Za-z0-9._-]+\.(?:sor|msor|trc)$",
+    re.IGNORECASE,
+)
 _MANAGED_PATH_RE: Final[re.Pattern[str]] = re.compile(
     r"^(?P<prefix>otdr/(?:input|output))/"
     r"(?P<year>\d{4})/(?P<month>\d{2})/(?P<day>\d{2})/"
@@ -77,6 +82,19 @@ def job_id_from_input_path(pathname: str) -> str:
     return match.group("job_id")
 
 
+def job_id_from_input_file_path(pathname: str) -> str:
+    """Validate one managed OTDR input pathname and return its UUID job id."""
+    match = _match_managed_path(pathname)
+    if (
+        match.group("prefix") != INPUT_PREFIX
+        or _MANAGED_INPUT_FILENAME_RE.fullmatch(match.group("filename")) is None
+    ):
+        raise BlobStorageError(
+            "input Blob pathname must point to a managed OTDR file"
+        )
+    return match.group("job_id")
+
+
 def _match_managed_path(pathname: str) -> re.Match[str]:
     if not isinstance(pathname, str) or pathname != pathname.strip():
         raise BlobStorageError("invalid Blob pathname")
@@ -119,6 +137,27 @@ def build_input_path(job_id: str, *, created_at: datetime | None = None) -> str:
         INPUT_PREFIX,
         job_id,
         "batch.zip",
+        created_at=created_at,
+    )
+
+
+def build_input_file_path(
+    job_id: str,
+    index: int,
+    filename: str,
+    *,
+    created_at: datetime | None = None,
+) -> str:
+    if index < 1:
+        raise BlobStorageError("input file index must be greater than zero")
+    safe_filename = _safe_filename(filename)
+    extension = PurePosixPath(safe_filename).suffix.lower()
+    if extension not in SUPPORTED_INPUT_EXTENSIONS:
+        raise BlobStorageError("unsupported OTDR input extension")
+    return build_job_path(
+        INPUT_PREFIX,
+        job_id,
+        f"{index:06d}-{safe_filename}",
         created_at=created_at,
     )
 
@@ -208,6 +247,7 @@ class PrivateBlobStorage:
         pathname: str,
         *,
         max_bytes: int = DEFAULT_MAX_DOWNLOAD_BYTES,
+        expected_size: int | None = None,
     ) -> bytes:
         self._validate_managed_path(pathname)
         if max_bytes <= 0:
@@ -216,6 +256,15 @@ class PrivateBlobStorage:
         if info.size is not None and info.size > max_bytes:
             raise BlobStorageSizeError(
                 f"Blob is too large to download ({info.size} > {max_bytes} bytes)"
+            )
+        if (
+            expected_size is not None
+            and info.size is not None
+            and info.size != expected_size
+        ):
+            raise BlobStorageSizeError(
+                f"Blob size does not match the upload manifest "
+                f"({info.size} != {expected_size} bytes)"
             )
         try:
             result = self._client.get(pathname, access="private", use_cache=False)
@@ -228,6 +277,11 @@ class PrivateBlobStorage:
         if len(result.content) > max_bytes:
             raise BlobStorageSizeError(
                 "Downloaded Blob exceeds the configured size limit"
+            )
+        if expected_size is not None and len(result.content) != expected_size:
+            raise BlobStorageSizeError(
+                f"Downloaded Blob size does not match the upload manifest "
+                f"({len(result.content)} != {expected_size} bytes)"
             )
         return result.content
 

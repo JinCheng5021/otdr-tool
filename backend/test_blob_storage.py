@@ -12,8 +12,10 @@ from .blob_storage import (
     BlobStorageOperationError,
     BlobStorageSizeError,
     PrivateBlobStorage,
+    build_input_file_path,
     build_input_path,
     build_output_path,
+    job_id_from_input_file_path,
     job_id_from_input_path,
 )
 
@@ -38,6 +40,20 @@ class BlobPathTests(unittest.TestCase):
             f"otdr/output/2026/07/22/{UPLOAD_ID}/Fast_Reporter_01.xlsx",
         )
         self.assertEqual(job_id_from_input_path(INPUT_PATH), UPLOAD_ID)
+        input_file_path = build_input_file_path(
+            UPLOAD_ID,
+            1,
+            "Trace 01.SOR",
+            created_at=CREATED_AT,
+        )
+        self.assertEqual(
+            input_file_path,
+            f"otdr/input/2026/07/22/{UPLOAD_ID}/000001-Trace_01.SOR",
+        )
+        self.assertEqual(
+            job_id_from_input_file_path(input_file_path),
+            UPLOAD_ID,
+        )
 
     def test_input_parser_rejects_noncanonical_or_wrong_namespace_paths(self) -> None:
         invalid_paths = [
@@ -75,6 +91,30 @@ class PrivateBlobStorageTests(unittest.TestCase):
             use_cache=False,
         )
         client.close.assert_called_once_with()
+
+    @patch("backend.blob_storage.BlobClient")
+    def test_download_rejects_content_that_does_not_match_manifest(
+        self,
+        client_type,
+    ) -> None:
+        client = client_type.return_value
+        client.head.return_value = SimpleNamespace(
+            pathname=INPUT_PATH,
+            url="https://private.example/input",
+            download_url="https://private.example/input?download=1",
+            content_type="application/octet-stream",
+            size=None,
+        )
+        client.get.return_value = SimpleNamespace(content=b"DATA")
+
+        storage = PrivateBlobStorage(token="test-token")
+        with self.assertRaises(BlobStorageSizeError):
+            storage.download_bytes(
+                INPUT_PATH,
+                max_bytes=8,
+                expected_size=5,
+            )
+        storage.close()
 
     @patch("backend.blob_storage.BlobClient")
     def test_download_stops_before_get_when_metadata_is_too_large(self, client_type) -> None:

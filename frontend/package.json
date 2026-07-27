@@ -6,7 +6,6 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@vercel/blob": "2.6.1",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
@@ -15,13 +14,13 @@
     "@types/node": "^16.18.126",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
+    "@vercel/blob": "2.6.1",
     "axios": "^1.18.1",
     "echarts": "^6.1.0",
     "echarts-for-react": "^3.0.6",
     "http-proxy-middleware": "^4.2.0",
     "jspdf": "^4.2.1",
     "jspdf-autotable": "^5.0.8",
-    "jszip": "^3.10.1",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "react-scripts": "5.0.1",

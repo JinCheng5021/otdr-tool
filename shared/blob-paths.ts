@@ -5,6 +5,8 @@ const MANAGED_PATH_PATTERN = new RegExp(
   `^(?<kind>input|output)/(?<year>\\d{4})/(?<month>\\d{2})/(?<day>\\d{2})/` +
     `(?<uploadId>${UUID_PATTERN})/(?<filename>[A-Za-z0-9._-]+)$`,
 );
+const MANAGED_INPUT_FILE_PATTERN =
+  /^\d{6}-[A-Za-z0-9._-]+\.(?:sor|msor|trc)$/i;
 
 export const MAXIMUM_BLOB_SIZE_IN_BYTES = 250 * 1024 * 1024;
 export const CLIENT_UPLOAD_TOKEN_LIFETIME_MS = 15 * 60 * 1000;
@@ -58,9 +60,15 @@ function parseManagedPath(pathname: unknown): ManagedBlobPath {
 
 export function parseInputPathname(pathname: unknown): ManagedBlobPath {
   const parsed = parseManagedPath(pathname);
-  if (parsed.kind !== 'input' || parsed.filename !== 'batch.zip') {
+  if (
+    parsed.kind !== 'input' ||
+    (
+      parsed.filename !== 'batch.zip' &&
+      !MANAGED_INPUT_FILE_PATTERN.test(parsed.filename)
+    )
+  ) {
     throw new BlobRequestValidationError(
-      'Input pathname must point to a managed batch.zip.',
+      'Input pathname must point to a managed OTDR file or legacy batch.zip.',
     );
   }
   return parsed;

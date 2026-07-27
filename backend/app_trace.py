@@ -9,11 +9,11 @@ import sqlite3
 import os
 from uuid import UUID, uuid4
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from typing import List
+from typing import Iterable, List
 
 from .msor_converter import build_workbook_from_uploads
 from .blob_storage import (
@@ -24,8 +24,10 @@ from .blob_storage import (
     BlobStorageOperationError,
     BlobStorageSizeError,
     PrivateBlobStorage,
-    build_input_path,
+    SUPPORTED_INPUT_EXTENSIONS,
+    build_input_file_path,
     build_output_path,
+    job_id_from_input_file_path,
     job_id_from_input_path,
 )
 
@@ -63,6 +65,7 @@ app.add_middleware(
 )
 
 ALLOWED_EXTENSIONS = ['.msor', '.sor', '.trc']
+INPUT_EXTENSION_PRIORITY = ('.sor', '.msor', '.trc')
 XLSX_CONTENT_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 HTML_PAGE = """<!DOCTYPE html>
 
@@ -1374,14 +1377,278 @@ async def home() -> HTMLResponse:
     return HTMLResponse(content=HTML_PAGE)
 
 @app.post('/api/blob-input')
-async def create_blob_input() -> JSONResponse:
+async def create_blob_input(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail='Danh sách file tải lên không hợp lệ.',
+        ) from exc
+
+    raw_files = body.get('files') if isinstance(body, dict) else None
+    if not isinstance(raw_files, list) or not raw_files:
+        raise HTTPException(
+            status_code=400,
+            detail='Cần ít nhất một file đo kiểm hợp lệ.',
+        )
+
+    candidates: list[tuple[str, int, str]] = []
+    for item in raw_files:
+        if not isinstance(item, dict):
+            continue
+        original_name = item.get('name')
+        size = item.get('size')
+        if (
+            not isinstance(original_name, str)
+            or not original_name
+            or os.path.basename(original_name.replace('\\', '/')) != original_name
+            or not isinstance(size, int)
+            or isinstance(size, bool)
+            or size <= 0
+        ):
+            continue
+        extension = os.path.splitext(original_name)[1].lower()
+        if extension in SUPPORTED_INPUT_EXTENSIONS:
+            candidates.append((original_name, size, extension))
+
+    selected_extension = next(
+        (
+            extension
+            for extension in INPUT_EXTENSION_PRIORITY
+            if any(item[2] == extension for item in candidates)
+        ),
+        None,
+    )
+    if selected_extension is None:
+        raise HTTPException(
+            status_code=400,
+            detail='Không có file .sor, .msor hoặc .trc hợp lệ.',
+        )
+
+    selected = [
+        item for item in candidates if item[2] == selected_extension
+    ]
+    total_size = sum(item[1] for item in selected)
+    if total_size > DEFAULT_MAX_DOWNLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f'Tổng dung lượng file vượt quá giới hạn '
+                f'{DEFAULT_MAX_DOWNLOAD_BYTES} byte.'
+            ),
+        )
+
     upload_id = str(uuid4())
+    files = [
+        {
+            'original_name': original_name,
+            'pathname': build_input_file_path(
+                upload_id,
+                index,
+                original_name,
+            ),
+            'size': size,
+        }
+        for index, (original_name, size, _extension) in enumerate(
+            selected,
+            start=1,
+        )
+    ]
     return JSONResponse(
         {
             "upload_id": upload_id,
-            "pathname": build_input_path(upload_id),
-            "maximum_size_in_bytes": DEFAULT_MAX_DOWNLOAD_BYTES,
+            "selected_extension": selected_extension,
+            "files": files,
+            "ignored_count": len(raw_files) - len(selected),
+            "maximum_total_size_in_bytes": DEFAULT_MAX_DOWNLOAD_BYTES,
         }
+    )
+
+
+def _record_export_history(
+    exporter_name: str,
+    unit: str,
+    route_name: str,
+) -> None:
+    readable_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+                INSERT INTO export_history (
+                    exporter_name,
+                    unit,
+                    route_name,
+                    export_time
+                )
+                VALUES (?, ?, ?, ?)
+            ''',
+            (exporter_name, unit, route_name, readable_time),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as exc:
+        print(f"Lỗi ghi lịch sử: {exc}")
+
+
+def _build_export_response(
+    payload: Iterable[tuple[str, bytes]],
+    *,
+    threshold_db: float,
+    section_threshold_db: str,
+    duration_threshold_s: str,
+    deviation_m: float,
+    expected_route_km: str,
+    jumper_excluded_m: float,
+    graph_reach_tolerance_km: float,
+    event_shortfall_tolerance_km: float,
+    overlength_tolerance_km: float,
+    segment_start_km: str,
+    segment_end_km: str,
+    section_export_scope: str,
+    section_merge_tolerance_m: float,
+    section_min_length_km: float,
+    section_event_source: str,
+    section_boundary_priority: str,
+    section_allow_split: str,
+    section_match_tolerance_m: float,
+    section_measurement_mode: str,
+    orl_pass_threshold_db: float,
+    orl_source_mode: str,
+    orl_missing_policy: str,
+    orl_allow_lower_bound: str,
+    orl_lower_bound_status: str,
+    orl_physical_mode: str,
+    output_mode: str,
+    stv_total_core: str,
+    stv_used_core: str,
+) -> Response:
+    expected_route_value = None
+    if expected_route_km.strip():
+        expected_route_value = float(expected_route_km.strip())
+
+    segment_start_value = None
+    segment_end_value = None
+    if segment_start_km.strip():
+        segment_start_value = float(segment_start_km.strip())
+    if segment_end_km.strip():
+        segment_end_value = float(segment_end_km.strip())
+
+    if section_export_scope == 'selected_range':
+        if segment_start_value is None or segment_end_value is None:
+            raise HTTPException(
+                status_code=400,
+                detail='Khi chọn xuất section theo đoạn đã chọn, cần nhập đủ Đoạn bắt đầu và Đoạn kết thúc.',
+            )
+        if segment_end_value <= segment_start_value:
+            raise HTTPException(
+                status_code=400,
+                detail='Đoạn kết thúc phải lớn hơn Đoạn bắt đầu.',
+            )
+    else:
+        if (segment_start_value is None) ^ (segment_end_value is None):
+            segment_start_value = None
+            segment_end_value = None
+        elif (
+            segment_start_value is not None
+            and segment_end_value is not None
+            and segment_end_value <= segment_start_value
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail='Đoạn kết thúc phải lớn hơn Đoạn bắt đầu nếu muốn phân tích thêm một đoạn riêng.',
+            )
+
+    policy = str(orl_missing_policy or '').strip().lower()
+    if policy in {'blank', 'empty', 'none', 'off', 'false'}:
+        derived_orl_allow_lower_bound = False
+        derived_orl_lower_bound_status = 'Unknown'
+        derived_orl_physical_mode = 'disabled'
+    elif policy in {'trace_check', 'trace', 'diagnostic', 'auto_trace'}:
+        derived_orl_allow_lower_bound = True
+        derived_orl_lower_bound_status = 'Unknown'
+        derived_orl_physical_mode = 'diagnostic'
+    elif policy in {'reference', 'show_reference', 'lower_bound', 'metadata'}:
+        derived_orl_allow_lower_bound = True
+        derived_orl_lower_bound_status = 'Unknown'
+        derived_orl_physical_mode = 'disabled'
+    else:
+        derived_orl_allow_lower_bound = str(orl_allow_lower_bound).lower() in {
+            '1',
+            'true',
+            'yes',
+            'on',
+        }
+        derived_orl_lower_bound_status = orl_lower_bound_status or 'Unknown'
+        derived_orl_physical_mode = orl_physical_mode or 'disabled'
+
+    section_threshold_value = None
+    if section_threshold_db.strip():
+        section_threshold_value = float(section_threshold_db.strip())
+
+    duration_threshold_value = None
+    if duration_threshold_s.strip():
+        duration_threshold_value = float(duration_threshold_s.strip())
+
+    stv_total_core_value = None
+    if stv_total_core.strip():
+        try:
+            stv_total_core_value = int(float(stv_total_core.strip()))
+        except ValueError:
+            pass
+
+    stv_used_core_value = None
+    if stv_used_core.strip():
+        try:
+            stv_used_core_value = int(float(stv_used_core.strip()))
+        except ValueError:
+            pass
+
+    workbook = build_workbook_from_uploads(
+        payload,
+        threshold_db=threshold_db,
+        section_threshold_db=section_threshold_value,
+        duration_threshold_s=duration_threshold_value,
+        deviation_m=deviation_m,
+        expected_route_km=expected_route_value,
+        jumper_excluded_m=jumper_excluded_m,
+        graph_reach_tolerance_km=graph_reach_tolerance_km,
+        event_shortfall_tolerance_km=event_shortfall_tolerance_km,
+        overlength_tolerance_km=overlength_tolerance_km,
+        segment_start_km=segment_start_value,
+        segment_end_km=segment_end_value,
+        section_export_scope=section_export_scope,
+        section_merge_tolerance_m=section_merge_tolerance_m,
+        section_min_length_km=section_min_length_km,
+        section_event_source=section_event_source,
+        section_boundary_priority=section_boundary_priority,
+        section_allow_split=str(section_allow_split).lower() in {
+            '1',
+            'true',
+            'yes',
+            'on',
+        },
+        section_match_tolerance_m=section_match_tolerance_m,
+        section_measurement_mode=section_measurement_mode,
+        orl_pass_threshold_db=orl_pass_threshold_db,
+        orl_source_mode=orl_source_mode,
+        orl_allow_lower_bound=derived_orl_allow_lower_bound,
+        orl_lower_bound_status=derived_orl_lower_bound_status,
+        orl_physical_mode=derived_orl_physical_mode,
+        output_mode=output_mode,
+        stv_total_core=stv_total_core_value,
+        stv_used_core=stv_used_core_value,
+    )
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    prefix = 'Bang_su_kien' if str(output_mode).lower() == 'stv' else 'FastReporter'
+    filename = f'{prefix}_{timestamp}.xlsx'
+    headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
+    return Response(
+        content=workbook.getvalue(),
+        media_type=XLSX_CONTENT_TYPE,
+        headers=headers,
     )
 
 
@@ -1441,122 +1708,39 @@ async def convert(
         else:
             payload.append((upload.filename or 'upload.bin', await upload.read()))
 
-    expected_route_value = None
-    if expected_route_km.strip():
-        expected_route_value = float(expected_route_km.strip())
-
-    segment_start_value = None
-    segment_end_value = None
-    if segment_start_km.strip():
-        segment_start_value = float(segment_start_km.strip())
-    if segment_end_km.strip():
-        segment_end_value = float(segment_end_km.strip())
-
-    if section_export_scope == 'selected_range':
-        if segment_start_value is None or segment_end_value is None:
-            raise HTTPException(status_code=400, detail='Khi chọn xuất section theo đoạn đã chọn, cần nhập đủ Đoạn bắt đầu và Đoạn kết thúc.')
-        if segment_end_value <= segment_start_value:
-            raise HTTPException(status_code=400, detail='Đoạn kết thúc phải lớn hơn Đoạn bắt đầu.')
-    else:
-        if (segment_start_value is None) ^ (segment_end_value is None):
-            segment_start_value = None
-            segment_end_value = None
-        elif segment_start_value is not None and segment_end_value is not None and segment_end_value <= segment_start_value:
-            raise HTTPException(status_code=400, detail='Đoạn kết thúc phải lớn hơn Đoạn bắt đầu nếu muốn phân tích thêm một đoạn riêng.')
-
-    policy = str(orl_missing_policy or '').strip().lower()
-    if policy in {'blank', 'empty', 'none', 'off', 'false'}:
-        derived_orl_allow_lower_bound = False
-        derived_orl_lower_bound_status = 'Unknown'
-        derived_orl_physical_mode = 'disabled'
-    elif policy in {'trace_check', 'trace', 'diagnostic', 'auto_trace'}:
-        derived_orl_allow_lower_bound = True
-        derived_orl_lower_bound_status = 'Unknown'
-        derived_orl_physical_mode = 'diagnostic'
-    elif policy in {'reference', 'show_reference', 'lower_bound', 'metadata'}:
-        derived_orl_allow_lower_bound = True
-        derived_orl_lower_bound_status = 'Unknown'
-        derived_orl_physical_mode = 'disabled'
-    else:
-        derived_orl_allow_lower_bound = str(orl_allow_lower_bound).lower() in {'1','true','yes','on'}
-        derived_orl_lower_bound_status = orl_lower_bound_status or 'Unknown'
-        derived_orl_physical_mode = orl_physical_mode or 'disabled'
-
-    section_threshold_value = None
-    if section_threshold_db.strip():
-        section_threshold_value = float(section_threshold_db.strip())
-
-    duration_threshold_value = None
-    if duration_threshold_s.strip():
-        duration_threshold_value = float(duration_threshold_s.strip())
-
-    stv_total_core_value = None
-    if stv_total_core.strip():
-        try:
-            stv_total_core_value = int(float(stv_total_core.strip()))
-        except ValueError:
-            pass
-
-    stv_used_core_value = None
-    if stv_used_core.strip():
-        try:
-            stv_used_core_value = int(float(stv_used_core.strip()))
-        except ValueError:
-            pass
-
-    workbook = build_workbook_from_uploads(
+    response = _build_export_response(
         payload,
         threshold_db=threshold_db,
-        section_threshold_db=section_threshold_value,
-        duration_threshold_s=duration_threshold_value,
+        section_threshold_db=section_threshold_db,
+        duration_threshold_s=duration_threshold_s,
         deviation_m=deviation_m,
-        expected_route_km=expected_route_value,
+        expected_route_km=expected_route_km,
         jumper_excluded_m=jumper_excluded_m,
         graph_reach_tolerance_km=graph_reach_tolerance_km,
         event_shortfall_tolerance_km=event_shortfall_tolerance_km,
         overlength_tolerance_km=overlength_tolerance_km,
-        segment_start_km=segment_start_value,
-        segment_end_km=segment_end_value,
+        segment_start_km=segment_start_km,
+        segment_end_km=segment_end_km,
         section_export_scope=section_export_scope,
         section_merge_tolerance_m=section_merge_tolerance_m,
         section_min_length_km=section_min_length_km,
         section_event_source=section_event_source,
         section_boundary_priority=section_boundary_priority,
-        section_allow_split=str(section_allow_split).lower() in {'1','true','yes','on'},
+        section_allow_split=section_allow_split,
         section_match_tolerance_m=section_match_tolerance_m,
         section_measurement_mode=section_measurement_mode,
         orl_pass_threshold_db=orl_pass_threshold_db,
         orl_source_mode=orl_source_mode,
-        orl_allow_lower_bound=derived_orl_allow_lower_bound,
-        orl_lower_bound_status=derived_orl_lower_bound_status,
-        orl_physical_mode=derived_orl_physical_mode,
+        orl_missing_policy=orl_missing_policy,
+        orl_allow_lower_bound=orl_allow_lower_bound,
+        orl_lower_bound_status=orl_lower_bound_status,
+        orl_physical_mode=orl_physical_mode,
         output_mode=output_mode,
-        stv_total_core=stv_total_core_value,
-        stv_used_core=stv_used_core_value,
+        stv_total_core=stv_total_core,
+        stv_used_core=stv_used_core,
     )
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    readable_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute('''
-            INSERT INTO export_history (exporter_name, unit, route_name, export_time)
-            VALUES (?, ?, ?, ?)
-        ''', (exporter_name, unit, route_name, readable_time))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"Lỗi ghi lịch sử: {e}")
-
-    prefix = 'Bang_su_kien' if str(output_mode).lower() == 'stv' else 'FastReporter'
-    filename = f'{prefix}_{timestamp}.xlsx'
-    headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
-    return Response(
-        content=workbook.getvalue(),
-        media_type=XLSX_CONTENT_TYPE,
-        headers=headers,
-    )
+    _record_export_history(exporter_name, unit, route_name)
+    return response
 
 
 def _filename_from_export_response(response: Response) -> str:
@@ -1586,7 +1770,8 @@ def _blob_http_exception(exc: BlobStorageError) -> HTTPException:
 @app.post('/convert-from-blob')
 async def convert_from_blob(
     upload_id: str = Form(...),
-    input_pathname: str = Form(...),
+    input_manifest: str = Form(''),
+    input_pathname: str = Form(''),
     threshold_db: float = Form(0.5),
     section_threshold_db: str = Form(''),
     duration_threshold_s: str = Form(''),
@@ -1634,54 +1819,131 @@ async def convert_from_blob(
         )
 
     try:
-        pathname_upload_id = job_id_from_input_path(input_pathname)
-        if pathname_upload_id != canonical_upload_id:
-            raise BlobStorageError('upload_id does not match the input Blob pathname')
+        manifest_items: list[dict] = []
+        if input_manifest.strip():
+            try:
+                decoded_manifest = json.loads(input_manifest)
+            except json.JSONDecodeError as exc:
+                raise BlobStorageError('input manifest is not valid JSON') from exc
+            if not isinstance(decoded_manifest, list) or not decoded_manifest:
+                raise BlobStorageError('input manifest must contain at least one file')
+
+            extensions: set[str] = set()
+            seen_paths: set[str] = set()
+            total_size = 0
+            for item in decoded_manifest:
+                if not isinstance(item, dict):
+                    raise BlobStorageError('input manifest item is invalid')
+                original_name = item.get('original_name')
+                pathname = item.get('pathname')
+                size = item.get('size')
+                if (
+                    not isinstance(original_name, str)
+                    or not original_name
+                    or os.path.basename(original_name.replace('\\', '/'))
+                    != original_name
+                    or not isinstance(pathname, str)
+                    or not isinstance(size, int)
+                    or isinstance(size, bool)
+                    or size <= 0
+                ):
+                    raise BlobStorageError('input manifest item is invalid')
+                extension = os.path.splitext(original_name)[1].lower()
+                if extension not in SUPPORTED_INPUT_EXTENSIONS:
+                    raise BlobStorageError('input manifest extension is unsupported')
+                if job_id_from_input_file_path(pathname) != canonical_upload_id:
+                    raise BlobStorageError(
+                        'upload_id does not match an input Blob pathname'
+                    )
+                if pathname in seen_paths:
+                    raise BlobStorageError('input manifest contains a duplicate pathname')
+                seen_paths.add(pathname)
+                extensions.add(extension)
+                total_size += size
+                manifest_items.append(
+                    {
+                        'original_name': original_name,
+                        'pathname': pathname,
+                        'size': size,
+                    }
+                )
+
+            if len(extensions) != 1:
+                raise BlobStorageError(
+                    'input manifest must contain exactly one OTDR file type'
+                )
+            if total_size > DEFAULT_MAX_DOWNLOAD_BYTES:
+                raise BlobStorageSizeError(
+                    'input manifest exceeds the configured total size limit'
+                )
+        elif input_pathname.strip():
+            if job_id_from_input_path(input_pathname) != canonical_upload_id:
+                raise BlobStorageError(
+                    'upload_id does not match the input Blob pathname'
+                )
+        else:
+            raise BlobStorageError('input manifest is required')
 
         with PrivateBlobStorage() as storage:
-            input_bytes = storage.download_bytes(input_pathname)
-            upload = UploadFile(
-                file=io.BytesIO(input_bytes),
-                size=len(input_bytes),
-                filename='batch.zip',
+            def payloads() -> Iterable[tuple[str, bytes]]:
+                if manifest_items:
+                    for item in manifest_items:
+                        yield (
+                            item['original_name'],
+                            storage.download_bytes(
+                                item['pathname'],
+                                max_bytes=item['size'],
+                                expected_size=item['size'],
+                            ),
+                        )
+                    return
+
+                import zipfile
+
+                zip_bytes = storage.download_bytes(input_pathname)
+                with zipfile.ZipFile(io.BytesIO(zip_bytes)) as archive:
+                    for zinfo in archive.infolist():
+                        if zinfo.is_dir():
+                            continue
+                        extension = os.path.splitext(zinfo.filename)[1].lower()
+                        if extension not in SUPPORTED_INPUT_EXTENSIONS:
+                            continue
+                        base_name = os.path.basename(zinfo.filename)
+                        if base_name:
+                            with archive.open(zinfo) as source:
+                                yield base_name, source.read()
+
+            export_response = _build_export_response(
+                payloads(),
+                threshold_db=threshold_db,
+                section_threshold_db=section_threshold_db,
+                duration_threshold_s=duration_threshold_s,
+                deviation_m=deviation_m,
+                expected_route_km=expected_route_km,
+                jumper_excluded_m=jumper_excluded_m,
+                graph_reach_tolerance_km=graph_reach_tolerance_km,
+                event_shortfall_tolerance_km=event_shortfall_tolerance_km,
+                overlength_tolerance_km=overlength_tolerance_km,
+                segment_start_km=segment_start_km,
+                segment_end_km=segment_end_km,
+                section_export_scope=section_export_scope,
+                section_merge_tolerance_m=section_merge_tolerance_m,
+                section_min_length_km=section_min_length_km,
+                section_event_source=section_event_source,
+                section_boundary_priority=section_boundary_priority,
+                section_allow_split=section_allow_split,
+                section_match_tolerance_m=section_match_tolerance_m,
+                section_measurement_mode=section_measurement_mode,
+                orl_pass_threshold_db=orl_pass_threshold_db,
+                orl_source_mode=orl_source_mode,
+                orl_missing_policy=orl_missing_policy,
+                orl_allow_lower_bound=orl_allow_lower_bound,
+                orl_lower_bound_status=orl_lower_bound_status,
+                orl_physical_mode=orl_physical_mode,
+                output_mode=output_mode,
+                stv_total_core=stv_total_core,
+                stv_used_core=stv_used_core,
             )
-            try:
-                export_response = await convert(
-                    files=[upload],
-                    threshold_db=threshold_db,
-                    section_threshold_db=section_threshold_db,
-                    duration_threshold_s=duration_threshold_s,
-                    deviation_m=deviation_m,
-                    expected_route_km=expected_route_km,
-                    jumper_excluded_m=jumper_excluded_m,
-                    graph_reach_tolerance_km=graph_reach_tolerance_km,
-                    event_shortfall_tolerance_km=event_shortfall_tolerance_km,
-                    overlength_tolerance_km=overlength_tolerance_km,
-                    segment_start_km=segment_start_km,
-                    segment_end_km=segment_end_km,
-                    section_export_scope=section_export_scope,
-                    section_merge_tolerance_m=section_merge_tolerance_m,
-                    section_min_length_km=section_min_length_km,
-                    section_event_source=section_event_source,
-                    section_boundary_priority=section_boundary_priority,
-                    section_allow_split=section_allow_split,
-                    section_match_tolerance_m=section_match_tolerance_m,
-                    section_measurement_mode=section_measurement_mode,
-                    orl_pass_threshold_db=orl_pass_threshold_db,
-                    orl_source_mode=orl_source_mode,
-                    orl_missing_policy=orl_missing_policy,
-                    orl_allow_lower_bound=orl_allow_lower_bound,
-                    orl_lower_bound_status=orl_lower_bound_status,
-                    orl_physical_mode=orl_physical_mode,
-                    output_mode=output_mode,
-                    exporter_name=exporter_name,
-                    unit=unit,
-                    route_name=route_name,
-                    stv_total_core=stv_total_core,
-                    stv_used_core=stv_used_core,
-                )
-            finally:
-                await upload.close()
 
             filename = _filename_from_export_response(export_response)
             output_bytes = bytes(export_response.body)
@@ -1692,6 +1954,21 @@ async def convert_from_blob(
                 content_type=XLSX_CONTENT_TYPE,
                 overwrite=False,
             )
+            verified = storage.metadata(stored.pathname)
+            if verified.size != len(output_bytes):
+                raise BlobStorageSizeError(
+                    'stored report size does not match the generated output'
+                )
+            _record_export_history(exporter_name, unit, route_name)
+
+            for item in manifest_items:
+                try:
+                    storage.delete(item['pathname'])
+                except BlobStorageError as cleanup_error:
+                    print(
+                        f"Warning: Could not delete input Blob "
+                        f"{item['pathname']}: {cleanup_error}"
+                    )
     except BlobStorageError as exc:
         raise _blob_http_exception(exc) from exc
 
