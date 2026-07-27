@@ -1,14 +1,48 @@
-import React, { useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import CurrentApp from './components/CurrentApp';
 import TraceViewer from './components/TraceViewer';
 import NotificationDropdown from './components/NotificationDropdown';
+import {
+  type InputFileSelection,
+  selectInputFiles,
+} from './components/TraceViewer/traceExport';
+
+interface InputBatch {
+  files: File[];
+  revision: number;
+}
 
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'current' | 'traceviewer'>('traceviewer');
+  const [inputBatch, setInputBatch] = useState<InputBatch>({
+    files: [],
+    revision: 0,
+  });
 
-  if (activeTab === 'current') {
-    return (
-      <div className="w-screen h-screen overflow-y-auto relative bg-surface">
+  const replaceInputFiles = useCallback((incomingFiles: File[]): InputFileSelection => {
+    const selection = selectInputFiles(incomingFiles);
+    setInputBatch((previous) => ({
+      files: selection.selectedFiles,
+      revision: previous.revision + 1,
+    }));
+    return selection;
+  }, []);
+
+  const clearInputFiles = useCallback(() => {
+    setInputBatch((previous) => ({
+      files: [],
+      revision: previous.revision + 1,
+    }));
+  }, []);
+
+  const currentView = (
+    <div
+      className={
+        activeTab === 'current'
+          ? 'w-screen h-screen overflow-y-auto relative bg-surface'
+          : 'hidden'
+      }
+    >
         <button 
           onClick={() => setActiveTab('traceviewer')}
           className="absolute top-4 left-4 z-[9999] bg-white/90 backdrop-blur p-2 rounded-full shadow-lg border border-outline-variant text-industrial-navy hover:scale-110 transition-transform flex items-center justify-center"
@@ -16,15 +50,20 @@ const App: React.FC = () => {
         >
           <span className="material-symbols-outlined">arrow_back</span>
         </button>
-        <CurrentApp />
-      </div>
-    );
-  }
+        <CurrentApp
+          isActive={activeTab === 'current'}
+          inputFiles={inputBatch.files}
+          inputRevision={inputBatch.revision}
+          replaceInputFiles={replaceInputFiles}
+        />
+    </div>
+  );
 
-  // Khi xuống đến đây, TypeScript hiểu ngầm activeTab CHẮC CHẮN là 'traceviewer'
-  // Do đó Sidebar chỉ hiển thị trạng thái traceviewer đang active.
   return (
-    <div className="antialiased min-h-screen flex flex-col bg-surface text-on-background font-body-lg selection:bg-primary-fixed selection:text-on-primary-fixed">
+    <>
+      {currentView}
+      {activeTab === 'traceviewer' && (
+        <div className="antialiased min-h-screen flex flex-col bg-surface text-on-background font-body-lg selection:bg-primary-fixed selection:text-on-primary-fixed">
       {/* TopAppBar */}
       <header className="bg-surface/80 backdrop-blur-md border-b border-outline-variant z-50 sticky top-0 px-margin-mobile md:px-margin-desktop w-full h-14 flex justify-between items-center">
         <div className="flex items-center gap-2">
@@ -107,7 +146,11 @@ const App: React.FC = () => {
 
         {/* Center Visualization & Configuration Area */}
         <div className="flex-1 flex flex-col min-w-0 h-[calc(100vh-56px)] overflow-y-auto">
-          <TraceViewer />
+          <TraceViewer
+            files={inputBatch.files}
+            replaceInputFiles={replaceInputFiles}
+            clearInputFiles={clearInputFiles}
+          />
         </div>
       </main>
 
@@ -137,7 +180,9 @@ const App: React.FC = () => {
       </nav>
       {/* Mobile Nav Spacing */}
       <div className="h-16 md:hidden"></div>
-    </div>
+        </div>
+      )}
+    </>
   );
 };
 

@@ -2,6 +2,7 @@ import React, { useState, useRef } from 'react';
 import Modals from './Modals';
 import {
   type BlobConversionResult,
+  type InputFileSelection,
   downloadFromSignedUrl,
   parseBlobConversionResponse,
   requestBlobInput,
@@ -12,9 +13,17 @@ import {
 
 const REPORT_PROCESSING_TIMEOUT_MS = 180 * 1000;
 
-const TraceViewer: React.FC = () => {
-  // State for files
-  const [files, setFiles] = useState<File[]>([]);
+interface TraceViewerProps {
+  files: File[];
+  replaceInputFiles: (files: File[]) => InputFileSelection;
+  clearInputFiles: () => void;
+}
+
+const TraceViewer: React.FC<TraceViewerProps> = ({
+  files,
+  replaceInputFiles,
+  clearInputFiles,
+}) => {
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -101,8 +110,7 @@ const TraceViewer: React.FC = () => {
   const addFiles = (incomingFiles: File[]) => {
     if (incomingFiles.length === 0) return;
     try {
-      const selection = selectInputFiles([...files, ...incomingFiles]);
-      setFiles(selection.selectedFiles);
+      const selection = replaceInputFiles(incomingFiles);
       setReadyReport(null);
       setStatus({
         message: selection.ignoredFiles.length > 0
@@ -134,12 +142,17 @@ const TraceViewer: React.FC = () => {
   };
 
   const removeFile = (index: number) => {
-    setFiles((prev) => prev.filter((_, i) => i !== index));
+    const remainingFiles = files.filter((_, i) => i !== index);
+    if (remainingFiles.length > 0) {
+      replaceInputFiles(remainingFiles);
+    } else {
+      clearInputFiles();
+    }
     setReadyReport(null);
   };
 
   const clearFiles = () => {
-    setFiles([]);
+    clearInputFiles();
     setReadyReport(null);
     setStatus(null);
   };

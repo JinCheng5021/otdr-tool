@@ -3,6 +3,7 @@ import axios from 'axios';
 import MobileLayout from './MobileLayout';
 import DesktopLayout from './DesktopLayout';
 import { APIResponse } from '../../types';
+import { type InputFileSelection } from '../TraceViewer/traceExport';
 
 function useMediaQuery(query: string) {
   const [matches, setMatches] = useState(false);
@@ -20,48 +21,101 @@ function useMediaQuery(query: string) {
   return matches;
 }
 
-const CurrentApp: React.FC = () => {
+interface CurrentAppProps {
+  isActive: boolean;
+  inputFiles: File[];
+  inputRevision: number;
+  replaceInputFiles: (files: File[]) => InputFileSelection;
+}
+
+const CurrentApp: React.FC<CurrentAppProps> = ({
+  isActive,
+  inputFiles,
+  inputRevision,
+  replaceInputFiles,
+}) => {
   const isDesktop = useMediaQuery('(min-width: 1024px)');
   const [apiDataList, setApiDataList] = useState<APIResponse[]>([]);
   const [currentFileIndex, setCurrentFileIndex] = useState<number>(0);
   const [loading, setLoading] = useState<boolean>(false);
   const [selectedEvent, setSelectedEvent] = useState<any>(null);
+  const requestRevision = useRef(0);
+  const activeController = useRef<AbortController | null>(null);
 
   const handleFiles = async (fileList: FileList) => {
     if (!fileList || fileList.length === 0) return;
-    const files = Array.from(fileList);
-    setLoading(true);
-    setSelectedEvent(null);
-    
-    // Updated route to point to /current API
-    const apiUrl = '/current/api/upload-otdr';
-    let totalItems = apiDataList.length;
-
     try {
-      for (let i = 0; i < files.length; i++) {
-        const formData = new FormData();
-        formData.append('files', files[i]);
-        
-        try {
-          const response = await axios.post<{ results: APIResponse[] }>(apiUrl, formData, {
-            headers: { 'Content-Type': 'multipart/form-data' }
-          });
-          
-          if (response.data.results && response.data.results.length > 0) {
-            const newResults = response.data.results;
-            setApiDataList(prev => [...prev, ...newResults]);
-            totalItems += newResults.length;
-            setCurrentFileIndex(totalItems - 1);
-          }
-        } catch (err: any) {
-          console.error(`Lỗi xử lý file ${files[i].name}:`, err);
-          alert(`Lỗi khi tải lên file ${files[i].name}: ${err.response?.data?.detail || err.message}`);
-        }
-      }
-    } finally {
-      setLoading(false);
+      replaceInputFiles(Array.from(fileList));
+      activeController.current?.abort();
+      requestRevision.current += 1;
+      setApiDataList([]);
+      setCurrentFileIndex(0);
+      setSelectedEvent(null);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : 'Danh sách file không hợp lệ.');
     }
   };
+
+  useEffect(() => {
+    activeController.current?.abort();
+    const revision = requestRevision.current + 1;
+    requestRevision.current = revision;
+    setApiDataList([]);
+    setCurrentFileIndex(0);
+    setSelectedEvent(null);
+
+    if (inputFiles.length === 0) {
+      setLoading(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    activeController.current = controller;
+    const apiUrl = '/current/api/upload-otdr';
+    const completedResults: APIResponse[] = [];
+
+    const processFiles = async () => {
+      setLoading(true);
+      for (let i = 0; i < inputFiles.length; i++) {
+        const formData = new FormData();
+        formData.append('files', inputFiles[i]);
+
+        try {
+          const response = await axios.post<{ results: APIResponse[] }>(apiUrl, formData, {
+            headers: { 'Content-Type': 'multipart/form-data' },
+            signal: controller.signal,
+          });
+
+          if (requestRevision.current !== revision || controller.signal.aborted) {
+            return;
+          }
+          if (response.data.results && response.data.results.length > 0) {
+            completedResults.push(...response.data.results);
+            setApiDataList([...completedResults]);
+            setCurrentFileIndex(completedResults.length - 1);
+          }
+        } catch (err: any) {
+          if (
+            requestRevision.current !== revision ||
+            controller.signal.aborted ||
+            axios.isCancel(err)
+          ) {
+            return;
+          }
+          console.error(`Lỗi xử lý file ${inputFiles[i].name}:`, err);
+          alert(`Lỗi khi tải lên file ${inputFiles[i].name}: ${err.response?.data?.detail || err.message}`);
+        }
+      }
+      if (requestRevision.current === revision) {
+        setLoading(false);
+      }
+    };
+
+    void processFiles();
+    return () => {
+      controller.abort();
+    };
+  }, [inputFiles, inputRevision]);
 
   const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
     if (event.target.files) {
@@ -129,6 +183,10 @@ const CurrentApp: React.FC = () => {
     setCurrentFileIndex,
     setSelectedEvent,
   };
+
+  if (!isActive) {
+    return null;
+  }
 
   return (
     <div
