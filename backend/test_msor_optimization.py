@@ -7,6 +7,8 @@ from typing import Optional
 import unittest
 from unittest.mock import patch
 
+from openpyxl import Workbook
+
 from . import msor_converter as converter
 
 
@@ -92,6 +94,17 @@ class CacheSafetyTests(unittest.TestCase):
         self.assertNotEqual(
             converter._fr_cache_key("trace-a.sor", raw),
             converter._fr_cache_key("trace-b.sor", raw),
+        )
+
+    def test_excluded_output_sheets_are_removed_from_workbook(self) -> None:
+        workbook = Workbook()
+        for title in converter.EXCLUDED_OUTPUT_SHEETS:
+            workbook.create_sheet(title)
+
+        converter._fr_remove_excluded_output_sheets(workbook)
+
+        self.assertTrue(
+            converter.EXCLUDED_OUTPUT_SHEETS.isdisjoint(workbook.sheetnames)
         )
 
 

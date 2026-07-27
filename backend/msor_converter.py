@@ -36,6 +36,16 @@ STV_DAT_FILL = PatternFill(fill_type='solid', fgColor='9DC3E6')
 STV_DUT_FILL = PatternFill(fill_type='solid', fgColor='FF0000')
 STV_SUY_HAO_FILL = PatternFill(fill_type='solid', fgColor='92D050')
 ALLOWED_EXTENSIONS = {'.msor', '.sor', '.trc', '.crt'}
+EXCLUDED_OUTPUT_SHEETS = frozenset({
+    'Output Rules',
+    'Core Metrics',
+    'Vendor Compatibility',
+    'Parser Diagnostics',
+    'ORL Analysis',
+    'Section Fit Quality',
+    'Sự kiện thô',
+    'Raw Trace Diagnostics',
+})
 HEADER_FILL = PatternFill(fill_type='solid', fgColor='DCE6F2')
 SUBHEADER_FILL = PatternFill(fill_type='solid', fgColor='EEF5FF')
 LOG_INFO_FILL = PatternFill(fill_type='solid', fgColor='EAF2FF')
@@ -7086,6 +7096,11 @@ def _fr_safe_sheet_remove(wb: Workbook, title: str) -> None:
         wb.remove(ws)
 
 
+def _fr_remove_excluded_output_sheets(wb: Workbook) -> None:
+    for title in EXCLUDED_OUTPUT_SHEETS:
+        _fr_safe_sheet_remove(wb, title)
+
+
 def _fr_write_header_row(ws, headers: list[str]) -> None:
     for col_idx, header in enumerate(headers, start=1):
         ws.cell(1, col_idx, header)
@@ -9515,26 +9530,11 @@ def _stv_build_workbook(
     _stv_fill_graph_check_sheet(ws_graph, summaries, contexts)
     ws_skipped = wb.create_sheet('Tệp bỏ qua')
     _stv_fill_skipped_sheet(ws_skipped, skipped)
-    ws_raw = wb.create_sheet('Sự kiện thô')
-    _stv_fill_raw_events_sheet(ws_raw, summaries, contexts)
     if sections:
         _fr_precompute_section_fit_quality(summaries, contexts, sections, section_match_tolerance_m=section_match_tolerance_m, section_measurement_mode=section_measurement_mode)
-        ws_fit = wb.create_sheet('Section Fit Quality')
-        _fr_fill_section_fit_quality_sheet(ws_fit, summaries, contexts)
-    ws_raw_diag = wb.create_sheet('Raw Trace Diagnostics')
-    _fr_fill_raw_trace_diagnostics_sheet(ws_raw_diag, summaries, contexts)
-    ws_orl = wb.create_sheet('ORL Analysis')
-    _fr_fill_orl_analysis_sheet(ws_orl, summaries, contexts)
-    ws_parser = wb.create_sheet('Parser Diagnostics')
-    _fr_fill_parser_diagnostics_sheet(ws_parser, summaries, contexts, skipped)
-    ws_vendor = wb.create_sheet('Vendor Compatibility')
-    _fr_fill_vendor_compatibility_matrix_sheet(ws_vendor, summaries, contexts, skipped)
     ws_strict = wb.create_sheet('Strict Validation')
     _fr_fill_strict_validation_sheet(ws_strict, summaries, contexts, expected_route_km=expected_route_km, length_tolerance_km=0.300, graph_reach_tolerance_km=graph_reach_tolerance_km, event_shortfall_tolerance_km=event_shortfall_tolerance_km, duration_threshold_s=duration_threshold_s, skipped=skipped)
-    ws_core = wb.create_sheet('Core Metrics')
-    _fr_fill_core_metrics_sheet(ws_core, summaries, contexts, threshold_db=threshold_db, section_pairs_by_file=None, duration_threshold_s=duration_threshold_s)
-    ws_rules = wb.create_sheet('Output Rules')
-    _fr_fill_output_rules_sheet(ws_rules, threshold_db=threshold_db, deviation_m=deviation_m, output_mode='stv', section_export_scope=section_export_scope, section_measurement_mode=section_measurement_mode, section_event_source=section_event_source, section_boundary_priority=section_boundary_priority, expected_route_km=expected_route_km, graph_reach_tolerance_km=graph_reach_tolerance_km, event_shortfall_tolerance_km=event_shortfall_tolerance_km, segment_start_km=segment_start_km, segment_end_km=segment_end_km, section_threshold_db=section_threshold_db, duration_threshold_s=duration_threshold_s)
+    _fr_remove_excluded_output_sheets(wb)
     _fr_apply_workbook_polish(wb)
     output = BytesIO()
     wb.save(output)
@@ -9660,7 +9660,7 @@ def build_workbook_from_uploads(
     # Events
     _fr_fill_events(wb['Events'], summaries, contexts, event_defs, deviation_m, threshold_db)
 
-    # Export all control parameters and the calculations they drive without changing core algorithms.
+    # Export retained control and diagnostic sheets without changing core algorithms.
     for extra_name in ['App Parameters', 'Route Analysis', 'Segment Analysis', 'Segment Events', 'Section Fit Quality', 'Raw Trace Diagnostics', 'ORL Analysis', 'Parser Diagnostics', 'Vendor Compatibility', 'Strict Validation', 'Run Log', 'Core Metrics', 'Output Rules']:
         _fr_safe_sheet_remove(wb, extra_name)
     ws_params = wb.create_sheet('App Parameters')
@@ -9698,26 +9698,13 @@ def build_workbook_from_uploads(
     _fr_fill_segment_analysis_sheet(ws_segment, summaries, contexts)
     ws_segment_events = wb.create_sheet('Segment Events')
     _fr_fill_segment_events_sheet(ws_segment_events, summaries, contexts)
-    ws_fit = wb.create_sheet('Section Fit Quality')
-    _fr_fill_section_fit_quality_sheet(ws_fit, summaries, contexts)
-    ws_raw_diag = wb.create_sheet('Raw Trace Diagnostics')
-    _fr_fill_raw_trace_diagnostics_sheet(ws_raw_diag, summaries, contexts)
-    ws_orl = wb.create_sheet('ORL Analysis')
-    _fr_fill_orl_analysis_sheet(ws_orl, summaries, contexts)
-    ws_parser = wb.create_sheet('Parser Diagnostics')
-    _fr_fill_parser_diagnostics_sheet(ws_parser, summaries, contexts, skipped)
-    ws_vendor = wb.create_sheet('Vendor Compatibility')
-    _fr_fill_vendor_compatibility_matrix_sheet(ws_vendor, summaries, contexts, skipped)
     ws_strict = wb.create_sheet('Strict Validation')
     _fr_fill_strict_validation_sheet(ws_strict, summaries, contexts, expected_route_km=expected_route_km, length_tolerance_km=length_tolerance_km if 'length_tolerance_km' in locals() else 0.300, graph_reach_tolerance_km=graph_reach_tolerance_km, event_shortfall_tolerance_km=event_shortfall_tolerance_km, duration_threshold_s=duration_threshold_s if 'duration_threshold_s' in locals() else None, skipped=skipped)
-    ws_core = wb.create_sheet('Core Metrics')
-    _fr_fill_core_metrics_sheet(ws_core, summaries, contexts, threshold_db=threshold_db, section_pairs_by_file=section_pairs_by_file, duration_threshold_s=duration_threshold_s)
-    ws_rules = wb.create_sheet('Output Rules')
-    _fr_fill_output_rules_sheet(ws_rules, threshold_db=threshold_db, deviation_m=deviation_m, output_mode='fastreporter', section_export_scope=section_export_scope, section_measurement_mode=section_measurement_mode, section_event_source=section_event_source, section_boundary_priority=section_boundary_priority, expected_route_km=expected_route_km, graph_reach_tolerance_km=graph_reach_tolerance_km, event_shortfall_tolerance_km=event_shortfall_tolerance_km, segment_start_km=segment_start_km, segment_end_km=segment_end_km, section_threshold_db=section_threshold_db, duration_threshold_s=duration_threshold_s)
     ws_log = wb.create_sheet('Run Log')
     _fr_log(logs, 'run', 'INFO', f'Tổng file hợp lệ: {len(summaries)} | Event defs: {len(event_defs)} | Sections: {len(sections)}')
     _fr_log(logs, 'run', 'INFO', f'Thời gian dựng workbook: {time.perf_counter() - t0:.2f}s')
     _fr_fill_run_log_sheet(ws_log, logs, skipped)
+    _fr_remove_excluded_output_sheets(wb)
     _fr_apply_workbook_polish(wb)
 
     output = BytesIO()
