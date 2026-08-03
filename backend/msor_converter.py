@@ -73,7 +73,11 @@ class _BoundedCache(OrderedDict):
         super().__setitem__(key, value)
         self.move_to_end(key)
         while len(self) > self.max_items:
-            self.popitem(last=False)
+            # OrderedDict.popitem() may route through this subclass's __getitem__
+            # on Python 3.9. That access moves the key and can make eviction raise
+            # KeyError. Delete the oldest key directly without reading its value.
+            oldest_key = next(iter(self))
+            OrderedDict.__delitem__(self, oldest_key)
 
 
 _MSOR_SECTIONS_CACHE: _BoundedCache = _BoundedCache()
@@ -355,6 +359,22 @@ class FileSummary:
     parse_family: str = ''
     parse_family_confidence: str = ''
     parse_family_reason: str = ''
+    total_loss_selection_reason: str = ''
+
+
+def _selected_total_loss_db(
+    summary: FileSummary,
+    fallback: Optional[float] = None,
+) -> Optional[float]:
+    """Return the authoritative total loss selected by ``summarize_file``.
+
+    ``route_corrected_total_loss_db`` is retained as a diagnostic candidate. When
+    route correction is accepted, ``summarize_file`` already copies that value to
+    ``total_loss_db``. Report builders must therefore consume ``total_loss_db`` so
+    that a rejected candidate cannot silently override the recorded decision.
+    """
+    value = getattr(summary, 'total_loss_db', None)
+    return value if value is not None else fallback
 
 
 @dataclass
@@ -3591,6 +3611,7 @@ def summarize_file(file_name: str, raw: bytes, parsed_context: Optional[tuple] =
 
     total_loss_db = fiber_end.total_loss_db if fiber_end.total_loss_db is not None else (sor_meta.get('total_loss_db') if sor_meta else None)
     total_loss_source = 'Tóm tắt SOR / điểm cuối sợi' if total_loss_db is not None else ''
+    total_loss_selection_reason = ''
     route_corrected_total_loss_db = None
     msor_direct_summary = None
     if ext == '.msor':
@@ -3645,6 +3666,10 @@ def summarize_file(file_name: str, raw: bytes, parsed_context: Optional[tuple] =
             if total_loss_db in (None, 0):
                 total_loss_db = route_total_loss_db
                 total_loss_source = 'Hiệu chỉnh theo tuyến'
+                total_loss_selection_reason = (
+                    'Không đọc được suy hao tổng hợp lệ từ tóm tắt SOR; '
+                    f'chọn giá trị ước tính theo tuyến {route_total_loss_db:.3f} dB.'
+                )
             else:
                 try:
                     parsed_att = float(total_loss_db) / float(length_km)
@@ -3652,14 +3677,22 @@ def summarize_file(file_name: str, raw: bytes, parsed_context: Optional[tuple] =
                     parsed_att = None
                 route_att = route_total_loss_db / float(length_km)
                 preterminal_reflective_loss = _find_preterminal_reflective_connector_loss(filtered, length_km)
-                suspicious_total = False
-                if parsed_att is None or not (0.01 <= parsed_att <= 1.20):
-                    suspicious_total = True
+                suspicious_reasons: list[str] = []
+                if parsed_att is None:
+                    suspicious_reasons.append('không tính được suy hao trung bình từ giá trị đã đọc')
+                elif not (0.01 <= parsed_att <= 1.20):
+                    suspicious_reasons.append(
+                        f'suy hao trung bình đã đọc {parsed_att:.3f} dB/km nằm ngoài dải kiểm tra 0.01-1.20 dB/km'
+                    )
                 elif not has_strong_keyevents_summary:
                     if parsed_att > max(route_att * 2.40, route_att + 0.35):
-                        suspicious_total = True
+                        suspicious_reasons.append(
+                            f'suy hao trung bình đã đọc {parsed_att:.3f} dB/km cao bất thường so với ước tính tuyến {route_att:.3f} dB/km'
+                        )
                     elif parsed_att < min(route_att * 0.25, max(route_att - 0.20, 0.005)):
-                        suspicious_total = True
+                        suspicious_reasons.append(
+                            f'suy hao trung bình đã đọc {parsed_att:.3f} dB/km thấp bất thường so với ước tính tuyến {route_att:.3f} dB/km'
+                        )
 
                 # Some standard SOR traces carry a tail-summary that includes a very large
                 # reflective connector right before the terminal fiber-end marker. That value
@@ -3670,13 +3703,21 @@ def summarize_file(file_name: str, raw: bytes, parsed_context: Optional[tuple] =
                     and preterminal_reflective_loss >= 5.0
                     and float(total_loss_db) > float(route_total_loss_db)
                     and (float(total_loss_db) - float(route_total_loss_db)) >= max(4.0, 0.45 * preterminal_reflective_loss)
+                    and parsed_att is not None
                     and parsed_att > max(route_att * 1.30, route_att + 0.08)
                 ):
-                    suspicious_total = True
+                    suspicious_reasons.append(
+                        f'phát hiện đầu nối phản xạ {preterminal_reflective_loss:.3f} dB gần cuối tuyến làm tóm tắt SOR cao bất thường'
+                    )
 
-                if suspicious_total:
+                if suspicious_reasons:
                     total_loss_db = route_total_loss_db
                     total_loss_source = 'Hiệu chỉnh theo tuyến'
+                    total_loss_selection_reason = (
+                        f'Chọn ước tính theo tuyến {route_total_loss_db:.3f} dB vì '
+                        + '; '.join(suspicious_reasons)
+                        + '.'
+                    )
 
             if _should_force_route_corrected_total_for_standard_sor(
                 summary_total_loss_db=parsed_total_loss_db,
@@ -3687,6 +3728,24 @@ def summarize_file(file_name: str, raw: bytes, parsed_context: Optional[tuple] =
             ):
                 total_loss_db = route_total_loss_db
                 total_loss_source = 'Hiệu chỉnh theo tuyến'
+                total_loss_selection_reason = (
+                    f'Chọn ước tính theo tuyến {route_total_loss_db:.3f} dB vì tóm tắt SOR '
+                    'có suy hao điểm cuối hoặc độ dốc điểm cuối bất thường.'
+                )
+
+    if not total_loss_selection_reason:
+        if total_loss_db is None:
+            total_loss_selection_reason = 'Không có giá trị suy hao tổng hợp lệ để lựa chọn.'
+        elif route_corrected_total_loss_db is not None and parsed_total_loss_db is not None:
+            total_loss_selection_reason = (
+                f'Giữ giá trị đã đọc {float(total_loss_db):.3f} dB từ {total_loss_source} vì hợp lệ '
+                f'và không thỏa điều kiện hiệu chỉnh; giá trị tuyến {route_corrected_total_loss_db:.3f} dB chỉ dùng đối chiếu.'
+            )
+        else:
+            total_loss_selection_reason = (
+                f'Chọn giá trị {float(total_loss_db):.3f} dB từ {total_loss_source} '
+                'vì đây là nguồn hợp lệ có mức ưu tiên cao nhất mà parser đọc được.'
+            )
 
     attenuation_dbkm = None
     if total_loss_db is not None and length_km not in (None, 0):
@@ -3757,6 +3816,7 @@ def summarize_file(file_name: str, raw: bytes, parsed_context: Optional[tuple] =
         parse_family=family_info.get('family', ''),
         parse_family_confidence=family_info.get('confidence', ''),
         parse_family_reason=family_info.get('reason', ''),
+        total_loss_selection_reason=total_loss_selection_reason,
     )
 
 
@@ -5872,10 +5932,10 @@ def _section_span_attenuation_estimate(
         except Exception:
             pass
 
+    # Use only the value selected by summarize_file. The route-corrected field is
+    # an audit candidate and may differ when correction was evaluated but rejected.
     for loss_value, length_value, label in (
-        (getattr(summary, 'route_corrected_total_loss_db', None), route_length, 'route-corrected span loss / length'),
-        (getattr(summary, 'total_loss_db', None), route_length, 'span loss / length'),
-        (getattr(summary, 'parsed_total_loss_db', None), route_length, 'parsed span loss / length'),
+        (_selected_total_loss_db(summary), route_length, 'selected span loss / length'),
     ):
         try:
             loss = float(loss_value)
@@ -7396,7 +7456,7 @@ def _stv_fill_main_sheet(
         ctx = contexts.get(summary.file_name) or {}
         core = _build_core_metrics(summary, ctx, threshold_db=threshold_db)
         ga = ctx.get('graph_assessment')
-        total_loss = summary.route_corrected_total_loss_db if summary.route_corrected_total_loss_db is not None else core['total_loss_db']
+        total_loss = _selected_total_loss_db(summary, core['total_loss_db'])
         length_km = core['length_km']
         if total_loss is not None and length_km not in (None, 0):
             attenuation = round(total_loss / length_km, 3)
@@ -7564,7 +7624,7 @@ def _stv_fill_main_sheet(
             if prev is None or value > prev:
                 bucketed[def_idx] = value
 
-        total_loss = summary.route_corrected_total_loss_db if summary.route_corrected_total_loss_db is not None else core['total_loss_db']
+        total_loss = _selected_total_loss_db(summary, core['total_loss_db'])
         length_km = core['length_km']
         if total_loss is not None and length_km not in (None, 0):
             attenuation = round(total_loss / length_km, 3)
@@ -7615,7 +7675,7 @@ def _stv_fill_graph_check_sheet(ws, summaries: list[FileSummary], contexts: dict
         'Chiều dài đồ thị thực, km', 'Chiều dài event, km', 'Chiều dài tuyến chuẩn, km',
         'Chênh lệch, km', 'Sai số chạm tuyến, km', 'Mức hụt event cho phép, km',
         'Đồ thị chạm tuyến', 'Trạng thái', 'Lý do', 'Suy hao đã đọc, dB', 'Suy hao hiệu chỉnh tuyến, dB',
-        'Nguồn suy hao đang dùng'
+        'Nguồn suy hao đang dùng', 'Lý do chọn suy hao tổng'
     ]
     for idx, label in enumerate(headers, start=1):
         ws.cell(1, idx, label)
@@ -7645,11 +7705,13 @@ def _stv_fill_graph_check_sheet(ws, summaries: list[FileSummary], contexts: dict
         ws.cell(row, 16, summary.parsed_total_loss_db)
         ws.cell(row, 17, summary.route_corrected_total_loss_db)
         ws.cell(row, 18, summary.loss_source_used)
+        ws.cell(row, 19, summary.total_loss_selection_reason)
         row += 1
-    for c in range(1, 19):
+    for c in range(1, 20):
         ws.column_dimensions[get_column_letter(c)].width = 18
     ws.column_dimensions['O'].width = 60
     ws.column_dimensions['R'].width = 28
+    ws.column_dimensions['S'].width = 90
 
 
 def _stv_fill_skipped_sheet(ws, skipped: list[str]) -> None:

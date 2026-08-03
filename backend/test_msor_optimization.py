@@ -108,6 +108,83 @@ class CacheSafetyTests(unittest.TestCase):
         )
 
 
+class TotalLossSelectionTests(unittest.TestCase):
+    @staticmethod
+    def _summary(
+        *,
+        total_loss_db: float,
+        route_candidate_db: float,
+        source: str,
+        reason: str,
+    ) -> converter.FileSummary:
+        return converter.FileSummary(
+            file_name='s37.sor',
+            fiber='Fiber 37',
+            wavelength_display='1550 nm',
+            total_loss_db=total_loss_db,
+            length_km=42.242,
+            attenuation_dbkm=round(total_loss_db / 42.242, 3),
+            splice_points=[],
+            end_distance_km=42.242,
+            graph_end_km=42.242,
+            graph_curve_max_km=42.242,
+            source_format='SOR',
+            parsed_total_loss_db=17.743,
+            route_corrected_total_loss_db=route_candidate_db,
+            loss_source_used=source,
+            total_loss_selection_reason=reason,
+        )
+
+    def test_selected_total_does_not_use_rejected_route_candidate(self) -> None:
+        summary = self._summary(
+            total_loss_db=17.743,
+            route_candidate_db=11.272,
+            source='Tóm tắt SOR / điểm cuối sợi',
+            reason='Giữ giá trị đã đọc vì hợp lệ.',
+        )
+
+        self.assertEqual(converter._selected_total_loss_db(summary), 17.743)
+
+    def test_graph_check_sheet_writes_selection_reason_column(self) -> None:
+        reason = 'Giữ giá trị đã đọc vì hợp lệ.'
+        summary = self._summary(
+            total_loss_db=17.743,
+            route_candidate_db=11.272,
+            source='Tóm tắt SOR / điểm cuối sợi',
+            reason=reason,
+        )
+        workbook = Workbook()
+        sheet = workbook.active
+
+        converter._stv_fill_graph_check_sheet(
+            sheet,
+            [summary],
+            {'s37.sor': {}},
+        )
+
+        self.assertEqual(sheet.cell(1, 19).value, 'Lý do chọn suy hao tổng')
+        self.assertEqual(sheet.cell(2, 19).value, reason)
+
+    def test_section_fallback_uses_selected_total(self) -> None:
+        summary = self._summary(
+            total_loss_db=17.743,
+            route_candidate_db=11.272,
+            source='Tóm tắt SOR / điểm cuối sợi',
+            reason='Giữ giá trị đã đọc vì hợp lệ.',
+        )
+        summary.attenuation_dbkm = None
+
+        loss, attenuation, method, _note = converter._section_span_attenuation_estimate(
+            summary,
+            0.0,
+            10.0,
+        )
+
+        self.assertEqual(loss, 4.2003)
+        self.assertEqual(attenuation, 0.42)
+        self.assertEqual(method, 'span_attenuation_estimate')
+
+
 class SorParseReuseTests(unittest.TestCase):
     def test_orl_extractors_use_preparsed_sor_metadata(self) -> None:
         meta = {"orl_db": 31.25}
