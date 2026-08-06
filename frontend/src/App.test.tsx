@@ -22,6 +22,8 @@ jest.mock('axios', () => ({
 jest.mock('echarts-for-react', () => () => null);
 
 beforeEach(() => {
+  window.alert = jest.fn();
+  jest.spyOn(console, 'error').mockImplementation(() => undefined);
   (axios.post as jest.Mock).mockReset();
   (axios.post as jest.Mock).mockImplementation(
     async (_url: string, formData: FormData) => {
@@ -42,6 +44,10 @@ beforeEach(() => {
     ok: true,
     json: async () => ({ status: 'success', data: [] }),
   });
+});
+
+afterEach(() => {
+  jest.restoreAllMocks();
 });
 
 function exportDropzone(): HTMLElement {
@@ -76,6 +82,60 @@ test('shows route graph navigation in its own header', () => {
   expect(
     screen.getByRole('heading', { name: /Đồ thị tuyến/i }),
   ).toBeInTheDocument();
+});
+
+test('updates session statistics from recognized traces', async () => {
+  (axios.post as jest.Mock).mockResolvedValueOnce({
+    data: {
+      results: [{
+        status: 'success',
+        filename: 'multi-trace.msor',
+        total_traces: 2,
+        traces: [],
+      }],
+    },
+  });
+  render(<App />);
+
+  fireEvent.drop(exportDropzone(), {
+    dataTransfer: { files: [new File(['trace'], 'multi-trace.msor')] },
+  });
+
+  await waitFor(() => {
+    expect(screen.getByLabelText('Trace nạp')).toHaveTextContent('02');
+  });
+  expect(screen.getByLabelText('Lỗi nhận diện')).toHaveTextContent('00');
+});
+
+test('counts recognition failures and resets them for a replacement batch', async () => {
+  (axios.post as jest.Mock)
+    .mockRejectedValueOnce(new Error('unrecognized trace'))
+    .mockResolvedValueOnce({
+      data: {
+        results: [{
+          status: 'success',
+          filename: 'replacement.sor',
+          total_traces: 1,
+          traces: [],
+        }],
+      },
+    });
+  render(<App />);
+
+  fireEvent.drop(exportDropzone(), {
+    dataTransfer: { files: [new File(['bad'], 'bad.sor')] },
+  });
+  await waitFor(() => {
+    expect(screen.getByLabelText('Lỗi nhận diện')).toHaveTextContent('01');
+  });
+
+  fireEvent.drop(exportDropzone(), {
+    dataTransfer: { files: [new File(['good'], 'replacement.sor')] },
+  });
+  await waitFor(() => {
+    expect(screen.getByLabelText('Trace nạp')).toHaveTextContent('01');
+    expect(screen.getByLabelText('Lỗi nhận diện')).toHaveTextContent('00');
+  });
 });
 
 test('automatically analyzes the Excel input batch for the route graph', async () => {

@@ -12,15 +12,30 @@ interface InputBatch {
   revision: number;
 }
 
+interface SessionStats {
+  loadedTraces: number;
+  recognitionErrors: number;
+}
+
+const EMPTY_SESSION_STATS: SessionStats = {
+  loadedTraces: 0,
+  recognitionErrors: 0,
+};
+
+const formatSessionCount = (value: number): string =>
+  Math.max(0, Math.trunc(value)).toString().padStart(2, '0');
+
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'current' | 'traceviewer'>('traceviewer');
   const [inputBatch, setInputBatch] = useState<InputBatch>({
     files: [],
     revision: 0,
   });
+  const [sessionStats, setSessionStats] = useState<SessionStats>(EMPTY_SESSION_STATS);
 
   const replaceInputFiles = useCallback((incomingFiles: File[]): InputFileSelection => {
     const selection = selectInputFiles(incomingFiles);
+    setSessionStats(EMPTY_SESSION_STATS);
     setInputBatch((previous) => ({
       files: selection.selectedFiles,
       revision: previous.revision + 1,
@@ -29,6 +44,7 @@ const App: React.FC = () => {
   }, []);
 
   const clearInputFiles = useCallback(() => {
+    setSessionStats(EMPTY_SESSION_STATS);
     setInputBatch((previous) => ({
       files: [],
       revision: previous.revision + 1,
@@ -62,6 +78,7 @@ const App: React.FC = () => {
           inputFiles={inputBatch.files}
           inputRevision={inputBatch.revision}
           replaceInputFiles={replaceInputFiles}
+          onSessionStatsChange={setSessionStats}
         />
       </div>
     </div>
@@ -125,26 +142,41 @@ const App: React.FC = () => {
             </nav>
           </div>
           
-          <div className="mt-auto bg-surface-container-high/50 p-4 rounded-xl border border-outline-variant">
+          <section
+            className="mt-auto bg-surface-container-high/50 p-4 rounded-xl border border-outline-variant"
+            aria-labelledby="session-stats-heading"
+          >
             <div className="flex items-center gap-2 mb-3">
               <span className="material-symbols-outlined text-[18px] text-industrial-navy">info</span>
-              <span className="text-[11px] font-bold text-on-surface-variant tracking-wider uppercase">Thống kê phiên</span>
+              <span id="session-stats-heading" className="text-[11px] font-bold text-on-surface-variant tracking-wider uppercase">Thống kê phiên</span>
             </div>
             <ul className="space-y-3">
               <li className="flex justify-between items-center">
                 <span className="text-xs text-on-surface-variant">Trace nạp:</span>
-                <span className="font-mono-data text-sm font-bold text-primary">00</span>
+                <span
+                  className="font-mono-data text-sm font-bold text-primary"
+                  aria-label="Trace nạp"
+                  aria-live="polite"
+                >
+                  {formatSessionCount(sessionStats.loadedTraces)}
+                </span>
               </li>
               <li className="flex justify-between items-center">
                 <span className="text-xs text-on-surface-variant">Lỗi nhận diện:</span>
-                <span className="font-mono-data text-sm font-bold text-error">00</span>
+                <span
+                  className="font-mono-data text-sm font-bold text-error"
+                  aria-label="Lỗi nhận diện"
+                  aria-live="polite"
+                >
+                  {formatSessionCount(sessionStats.recognitionErrors)}
+                </span>
               </li>
               <li className="flex justify-between items-center">
                 <span className="text-xs text-on-surface-variant">Phiên bản:</span>
                 <span className="font-mono-data text-xs text-on-surface-variant">v2.1.4</span>
               </li>
             </ul>
-          </div>
+          </section>
         </aside>
 
         {/* Center Visualization & Configuration Area */}

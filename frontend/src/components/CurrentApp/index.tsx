@@ -26,19 +26,35 @@ interface CurrentAppProps {
   inputFiles: File[];
   inputRevision: number;
   replaceInputFiles: (files: File[]) => InputFileSelection;
+  onSessionStatsChange: (stats: {
+    loadedTraces: number;
+    recognitionErrors: number;
+  }) => void;
 }
+
+const recognizedTraceCount = (result: APIResponse): number => {
+  if (result.status.toLowerCase() !== 'success') return 0;
+  const declaredCount = Number(result.total_traces);
+  const traceArrayCount = Array.isArray(result.traces) ? result.traces.length : 0;
+  const safeDeclaredCount = Number.isFinite(declaredCount) && declaredCount > 0
+    ? Math.trunc(declaredCount)
+    : 0;
+  return Math.max(safeDeclaredCount, traceArrayCount);
+};
 
 const CurrentApp: React.FC<CurrentAppProps> = ({
   isActive,
   inputFiles,
   inputRevision,
   replaceInputFiles,
+  onSessionStatsChange,
 }) => {
   const isDesktop = useMediaQuery('(min-width: 1024px)');
   const [apiDataList, setApiDataList] = useState<APIResponse[]>([]);
   const [currentFileIndex, setCurrentFileIndex] = useState<number>(0);
   const [loading, setLoading] = useState<boolean>(false);
   const [selectedEvent, setSelectedEvent] = useState<any>(null);
+  const [recognitionErrors, setRecognitionErrors] = useState<number>(0);
   const requestRevision = useRef(0);
   const activeController = useRef<AbortController | null>(null);
 
@@ -57,12 +73,21 @@ const CurrentApp: React.FC<CurrentAppProps> = ({
   };
 
   useEffect(() => {
+    const loadedTraces = apiDataList.reduce(
+      (total, result) => total + recognizedTraceCount(result),
+      0,
+    );
+    onSessionStatsChange({ loadedTraces, recognitionErrors });
+  }, [apiDataList, onSessionStatsChange, recognitionErrors]);
+
+  useEffect(() => {
     activeController.current?.abort();
     const revision = requestRevision.current + 1;
     requestRevision.current = revision;
     setApiDataList([]);
     setCurrentFileIndex(0);
     setSelectedEvent(null);
+    setRecognitionErrors(0);
 
     if (inputFiles.length === 0) {
       setLoading(false);
@@ -89,8 +114,15 @@ const CurrentApp: React.FC<CurrentAppProps> = ({
           if (requestRevision.current !== revision || controller.signal.aborted) {
             return;
           }
-          if (response.data.results && response.data.results.length > 0) {
-            completedResults.push(...response.data.results);
+          const responseResults = response.data.results ?? [];
+          if (responseResults.reduce(
+            (total, result) => total + recognizedTraceCount(result),
+            0,
+          ) === 0) {
+            setRecognitionErrors((previous) => previous + 1);
+          }
+          if (responseResults.length > 0) {
+            completedResults.push(...responseResults);
             setApiDataList([...completedResults]);
             setCurrentFileIndex(completedResults.length - 1);
           }
@@ -102,6 +134,7 @@ const CurrentApp: React.FC<CurrentAppProps> = ({
           ) {
             return;
           }
+          setRecognitionErrors((previous) => previous + 1);
           console.error(`Lỗi xử lý file ${inputFiles[i].name}:`, err);
           alert(`Lỗi khi tải lên file ${inputFiles[i].name}: ${err.response?.data?.detail || err.message}`);
         }
