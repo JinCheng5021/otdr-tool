@@ -362,6 +362,40 @@ class FileSummary:
     total_loss_selection_reason: str = ''
 
 
+@dataclass(frozen=True)
+class _StandardSorEventLossDecision:
+    allowed: bool
+    used_loss_db: float = 0.0
+    reason_code: str = ''
+    artifact: bool = False
+
+
+@dataclass(frozen=True)
+class _StandardSorRouteLossEstimate:
+    total_loss_db: Optional[float]
+    fiber_loss_db: float
+    event_loss_db: float
+    valid_slope_length_km: float
+    invalid_slope_length_km: float
+    slope_coverage_ratio: float
+    largest_invalid_slope_gap_km: float
+    confidence: str
+    rejected_artifact_count: int = 0
+
+    @property
+    def auto_selectable(self) -> bool:
+        return self.total_loss_db is not None and self.confidence == 'high'
+
+
+@dataclass
+class _TotalLossTraceContext:
+    total_loss_db: Optional[float]
+    length_km: Optional[float]
+    end_distance_km: Optional[float]
+    graph_end_km: Optional[float]
+    graph_curve_max_km: Optional[float]
+
+
 def _selected_total_loss_db(
     summary: FileSummary,
     fallback: Optional[float] = None,
@@ -1580,6 +1614,89 @@ def _is_standard_sor_reflective_event(row: EventRow) -> bool:
     return row.reflectance_db is not None and (-200.0 < float(row.reflectance_db) < 0.0)
 
 
+def _standard_sor_event_loss_decision(
+    row: EventRow,
+    length_km: float,
+    ordered: list[EventRow],
+    idx: int,
+    cluster_gap_km: float,
+    endpoint_zone_km: float,
+) -> _StandardSorEventLossDecision:
+    """Apply one shared event-loss policy to every standard-SOR estimator.
+
+    Previously the STV-like fallback accepted positive values that the route
+    estimator rejected.  Keeping the decision in one place prevents a rejected
+    tail from being rebuilt with the same vendor sentinel/event artifact.
+    """
+    loss = row.loss_db
+    if loss is None:
+        return _StandardSorEventLossDecision(False, reason_code='missing_loss')
+    try:
+        loss_f = float(loss)
+    except Exception:
+        return _StandardSorEventLossDecision(False, reason_code='invalid_loss')
+    if not math.isfinite(loss_f) or loss_f <= 0:
+        return _StandardSorEventLossDecision(False, reason_code='non_positive_loss')
+
+    dist = float(row.distance_km or 0.0)
+    event_type = (row.event_type or '').strip()
+    near_start = dist <= endpoint_zone_km
+    near_end = (float(length_km) - dist) <= endpoint_zone_km
+    terminal = _is_standard_sor_terminal_event(row)
+    reflective = _is_standard_sor_reflective_event(row)
+    label = (row.label or '').strip()
+    found_by_software = len(label) >= 2 and label[1] == 'F'
+    slope = float(row.slope_dbkm) if isinstance(row.slope_dbkm, (int, float)) else None
+    sentinel_slope = slope is not None and math.isfinite(slope) and slope >= 10.0
+
+    if terminal:
+        return _StandardSorEventLossDecision(False, reason_code='terminal_event')
+    if event_type == 'First Connector':
+        return _StandardSorEventLossDecision(False, reason_code='first_connector')
+    if sentinel_slope and loss_f >= 3.0:
+        return _StandardSorEventLossDecision(False, reason_code='sentinel_slope_high_loss', artifact=True)
+    if reflective and (near_start or near_end):
+        return _StandardSorEventLossDecision(
+            False,
+            reason_code='reflective_endpoint',
+            artifact=loss_f >= 5.0,
+        )
+    if event_type == 'Connector' and reflective and loss_f > 1.0:
+        return _StandardSorEventLossDecision(False, reason_code='reflective_connector_high_loss', artifact=True)
+    if event_type == 'Connector' and near_start and loss_f > 0.75:
+        return _StandardSorEventLossDecision(False, reason_code='start_connector_high_loss', artifact=True)
+
+    prev_loss = None
+    next_loss = None
+    prev_gap = None
+    next_gap = None
+    if idx > 0:
+        prev_row = ordered[idx - 1]
+        prev_gap = dist - float(prev_row.distance_km or 0.0)
+        prev_loss = float(prev_row.loss_db) if prev_row.loss_db is not None else None
+    if idx + 1 < len(ordered):
+        next_row = ordered[idx + 1]
+        next_gap = float(next_row.distance_km or 0.0) - dist
+        next_loss = float(next_row.loss_db) if next_row.loss_db is not None else None
+
+    clustered_high_loss = False
+    if loss_f > 1.0 and not reflective:
+        if near_start or near_end:
+            clustered_high_loss = True
+        if prev_gap is not None and prev_gap <= cluster_gap_km and prev_loss is not None and prev_loss > 0.8:
+            clustered_high_loss = True
+        if next_gap is not None and next_gap <= cluster_gap_km and next_loss is not None and next_loss > 0.8:
+            clustered_high_loss = True
+        if loss_f >= 3.0:
+            clustered_high_loss = True
+    if clustered_high_loss:
+        reason = 'software_high_loss' if found_by_software else 'clustered_high_loss'
+        return _StandardSorEventLossDecision(False, reason_code=reason, artifact=True)
+
+    used_loss = min(loss_f, 1.0) if not reflective and loss_f > 1.0 else loss_f
+    return _StandardSorEventLossDecision(True, used_loss_db=used_loss, reason_code='accepted')
+
+
 def _choose_standard_sor_end_distance_km(rows: list[EventRow], parsed_end_distance_km: Optional[float]) -> Optional[float]:
     ordered = [r for r in rows if r.distance_km is not None]
     if not ordered:
@@ -1647,104 +1764,102 @@ def _estimate_total_loss_from_standard_sor_heuristic(rows: list[EventRow]) -> Op
     return round(total, 3) if total > 0 else None
 
 
-def _estimate_route_total_loss_from_standard_sor(rows: list[EventRow], length_km: Optional[float]) -> Optional[float]:
+def _estimate_route_total_loss_details_from_standard_sor(
+    rows: list[EventRow],
+    length_km: Optional[float],
+) -> _StandardSorRouteLossEstimate:
     ordered = [r for r in rows if r.distance_km is not None]
     if not ordered:
-        return None
+        return _StandardSorRouteLossEstimate(None, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 'none')
     ordered = sorted(ordered, key=lambda r: (r.distance_km or 0.0, r.event_no))
     if length_km in (None, 0):
         length_km = _choose_standard_sor_end_distance_km(ordered, None)
     if length_km in (None, 0):
-        return None
+        return _StandardSorRouteLossEstimate(None, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 'none')
 
-    ordered = [r for r in ordered if (r.distance_km or 0.0) <= float(length_km) + 0.25]
-    endpoint_zone_km = max(0.30, min(2.00, 0.02 * float(length_km)))
-    cluster_gap_km = max(0.40, min(0.80, 0.01 * float(length_km)))
+    route_length_km = float(length_km)
+    ordered = [r for r in ordered if (r.distance_km or 0.0) <= route_length_km + 0.25]
+    endpoint_zone_km = max(0.30, min(2.00, 0.02 * route_length_km))
+    cluster_gap_km = max(0.40, min(0.80, 0.01 * route_length_km))
 
     fiber_section_loss = 0.0
     discrete_event_loss = 0.0
     prev_distance = 0.0
     valid_slopes: list[float] = []
+    valid_slope_length_km = 0.0
+    invalid_slope_length_km = 0.0
+    largest_invalid_slope_gap_km = 0.0
+    rejected_artifact_count = 0
 
     for idx, row in enumerate(ordered):
-        dist = min(float(row.distance_km or 0.0), float(length_km))
+        dist = min(float(row.distance_km or 0.0), route_length_km)
         seg_len = max(dist - prev_distance, 0.0)
         slope = row.slope_dbkm
+        slope_usable = False
         if slope is not None:
             slope_f = float(slope)
             if 0 < slope_f < 0.45:
                 fiber_section_loss += slope_f * seg_len
                 valid_slopes.append(slope_f)
+                slope_usable = True
             elif 0.45 <= slope_f < 1.0 and seg_len <= 0.25:
                 fiber_section_loss += 0.25 * seg_len
                 valid_slopes.append(0.25)
+                slope_usable = True
+        if slope_usable:
+            valid_slope_length_km += seg_len
+        else:
+            invalid_slope_length_km += seg_len
+            largest_invalid_slope_gap_km = max(largest_invalid_slope_gap_km, seg_len)
         prev_distance = dist
 
-        loss = row.loss_db
-        if loss is None:
-            continue
-        loss_f = float(loss)
-        if loss_f <= 0:
-            continue
+        decision = _standard_sor_event_loss_decision(
+            row,
+            route_length_km,
+            ordered,
+            idx,
+            cluster_gap_km,
+            endpoint_zone_km,
+        )
+        if decision.artifact:
+            rejected_artifact_count += 1
+        if decision.allowed:
+            discrete_event_loss += decision.used_loss_db
 
-        et = (row.event_type or '').strip()
-        near_start = dist <= endpoint_zone_km
-        near_end = (float(length_km) - dist) <= endpoint_zone_km
-        terminal = _is_standard_sor_terminal_event(row)
-        reflective = _is_standard_sor_reflective_event(row)
-
-        if terminal:
-            continue
-        if et == 'First Connector':
-            continue
-        if reflective and (near_start or near_end):
-            continue
-        if et == 'Connector' and reflective and loss_f > 1.0:
-            continue
-        if et == 'Connector' and near_start and loss_f > 0.75:
-            continue
-
-        # Generic anti-overcounting for SOR files without reliable tail-summary:
-        # large non-reflective losses near the edge or packed in a short cluster are
-        # often analysis artifacts / duplicated section boundaries rather than route-loss points.
-        prev_loss = None
-        next_loss = None
-        prev_gap = None
-        next_gap = None
-        if idx > 0:
-            prev_row = ordered[idx - 1]
-            prev_gap = dist - float(prev_row.distance_km or 0.0)
-            prev_loss = float(prev_row.loss_db) if prev_row.loss_db is not None else None
-        if idx + 1 < len(ordered):
-            next_row = ordered[idx + 1]
-            next_gap = float(next_row.distance_km or 0.0) - dist
-            next_loss = float(next_row.loss_db) if next_row.loss_db is not None else None
-
-        clustered_high_loss = False
-        if loss_f > 1.0 and not reflective:
-            if near_end or near_start:
-                clustered_high_loss = True
-            if prev_gap is not None and prev_gap <= cluster_gap_km and prev_loss is not None and prev_loss > 0.8:
-                clustered_high_loss = True
-            if next_gap is not None and next_gap <= cluster_gap_km and next_loss is not None and next_loss > 0.8:
-                clustered_high_loss = True
-            if loss_f >= 3.0:
-                clustered_high_loss = True
-
-        if clustered_high_loss:
-            continue
-
-        # Keep normal inline events, but cap unusually large non-reflective point loss.
-        if not reflective and loss_f > 1.0:
-            loss_f = 1.0
-
-        discrete_event_loss += loss_f
+    if prev_distance < route_length_km:
+        tail_gap = route_length_km - prev_distance
+        invalid_slope_length_km += tail_gap
+        largest_invalid_slope_gap_km = max(largest_invalid_slope_gap_km, tail_gap)
 
     if fiber_section_loss <= 0 and valid_slopes:
-        fiber_section_loss = median(valid_slopes) * float(length_km)
+        fiber_section_loss = median(valid_slopes) * route_length_km
 
     total = fiber_section_loss + discrete_event_loss
-    return round(total, 3) if total > 0 else None
+    total_loss_db = round(total, 3) if total > 0 else None
+    coverage_ratio = min(max(valid_slope_length_km / route_length_km, 0.0), 1.0)
+    if total_loss_db is None:
+        confidence = 'none'
+    elif coverage_ratio >= 0.80 and largest_invalid_slope_gap_km <= max(2.0, 0.20 * route_length_km):
+        confidence = 'high'
+    elif coverage_ratio >= 0.50 and largest_invalid_slope_gap_km <= max(3.0, 0.35 * route_length_km):
+        confidence = 'medium'
+    else:
+        confidence = 'low'
+    return _StandardSorRouteLossEstimate(
+        total_loss_db=total_loss_db,
+        fiber_loss_db=round(fiber_section_loss, 6),
+        event_loss_db=round(discrete_event_loss, 6),
+        valid_slope_length_km=round(valid_slope_length_km, 6),
+        invalid_slope_length_km=round(invalid_slope_length_km, 6),
+        slope_coverage_ratio=round(coverage_ratio, 6),
+        largest_invalid_slope_gap_km=round(largest_invalid_slope_gap_km, 6),
+        confidence=confidence,
+        rejected_artifact_count=rejected_artifact_count,
+    )
+
+
+def _estimate_route_total_loss_from_standard_sor(rows: list[EventRow], length_km: Optional[float]) -> Optional[float]:
+    return _estimate_route_total_loss_details_from_standard_sor(rows, length_km).total_loss_db
 
 
 
@@ -1758,8 +1873,9 @@ def _estimate_stv_like_total_loss_from_standard_sor(rows: list[EventRow], length
     if length_km in (None, 0):
         return None
 
-    terminal_label = (ordered[-1].label or '').strip()
-    terminal_is_reflective_end = len(terminal_label) >= 2 and terminal_label[1] == 'E' and terminal_label[:1] in {'1', '2'}
+    route_length_km = float(length_km)
+    endpoint_zone_km = max(0.30, min(2.00, 0.02 * route_length_km))
+    cluster_gap_km = max(0.40, min(0.80, 0.01 * route_length_km))
 
     event_sum = 0.0
     fiber_section_loss = 0.0
@@ -1786,18 +1902,9 @@ def _estimate_stv_like_total_loss_from_standard_sor(rows: list[EventRow], length
         if loss is None:
             continue
         loss_f = float(loss)
-        label = (row.label or '').strip()
 
         if first_numeric_loss is None:
             first_numeric_loss = loss_f
-
-        # STV-style event table hides terminal end losses encoded as *E.
-        if terminal_is_reflective_end and idx == len(ordered) - 1:
-            continue
-        if len(label) >= 2 and label[1] == 'E':
-            continue
-        if row.event_type == 'First Connector':
-            continue
 
         if loss_f < 0:
             negative_abs_sum += abs(loss_f)
@@ -1805,12 +1912,23 @@ def _estimate_stv_like_total_loss_from_standard_sor(rows: list[EventRow], length
         if loss_f == 0:
             continue
 
-        positive_numeric_events.append(loss_f)
+        decision = _standard_sor_event_loss_decision(
+            row,
+            route_length_km,
+            ordered,
+            idx,
+            cluster_gap_km,
+            endpoint_zone_km,
+        )
+        if not decision.allowed:
+            continue
+        used_loss = decision.used_loss_db
+        positive_numeric_events.append(used_loss)
         if row.event_type == 'Connector':
-            positive_connector_losses.append(loss_f)
-        if dist < float(length_km) - 2.0 and loss_f > 2.0:
+            positive_connector_losses.append(used_loss)
+        if dist < float(length_km) - 2.0 and used_loss > 2.0:
             midline_high_event = True
-        event_sum += loss_f
+        event_sum += used_loss
 
     # Default STV-like fallback: displayed positive event losses + accumulated section attenuation
     total = event_sum + fiber_section_loss
@@ -1962,6 +2080,48 @@ def _decode_standard_sor_event_type(code: str, idx: int, total_events: int, dist
 
 
 
+def _find_preterminal_total_loss_anomaly(rows: list[EventRow], length_km: Optional[float]) -> Optional[dict]:
+    """Return a high-loss event near Fiber End that can inflate route summaries."""
+    if length_km in (None, 0):
+        return None
+    ordered = [r for r in rows if r.distance_km is not None]
+    if not ordered:
+        return None
+    ordered = sorted(ordered, key=lambda r: (r.distance_km or 0.0, r.event_no))
+    route_length_km = float(length_km)
+    end_zone_km = max(3.0, 0.03 * route_length_km)
+    for row in reversed(ordered):
+        if _is_standard_sor_terminal_event(row):
+            continue
+        dist = float(row.distance_km or 0.0)
+        if (route_length_km - dist) > end_zone_km:
+            break
+        loss = float(row.loss_db) if isinstance(row.loss_db, (int, float)) else None
+        if loss is None or not math.isfinite(loss) or loss <= 0:
+            continue
+        slope = float(row.slope_dbkm) if isinstance(row.slope_dbkm, (int, float)) else None
+        label = (row.label or '').strip()
+        reflective = _is_standard_sor_reflective_event(row)
+        sentinel_slope = slope is not None and math.isfinite(slope) and slope >= 10.0
+        found_by_software = len(label) >= 2 and label[1] == 'F'
+        reason_code = ''
+        if sentinel_slope and loss >= 3.0:
+            reason_code = 'sentinel_slope_high_loss'
+        elif reflective and loss >= 5.0:
+            reason_code = 'reflective_high_loss'
+        elif found_by_software and not reflective and loss >= 3.0:
+            reason_code = 'software_high_loss'
+        if reason_code:
+            return {
+                'loss_db': loss,
+                'slope_dbkm': slope,
+                'distance_km': dist,
+                'reason_code': reason_code,
+                'reflective': reflective,
+            }
+    return None
+
+
 def _find_preterminal_reflective_connector_loss(rows: list[EventRow], length_km: Optional[float]) -> Optional[float]:
     if length_km in (None, 0):
         return None
@@ -2063,10 +2223,16 @@ def _parse_standard_sor_events_with_meta(file_name: str, raw: bytes) -> tuple[li
             ))
 
         total_loss_db = None
+        total_loss_origin = ''
+        tail_total_loss_db = None
+        tail_validation_status = 'missing'
+        tail_rejection_reason = 'KeyEvents không có tail suy hao tổng đủ dài.'
         parsed_end_distance_km = None
         tail_pos = pos
         if tail_pos + 22 <= block_end:
             parsed_total = _sor_get_signed(raw, tail_pos, 4) * 0.001
+            if math.isfinite(float(parsed_total)):
+                tail_total_loss_db = round(float(parsed_total), 3)
             tail_pos += 4
             _loss_start_km = _sor_get_signed(raw, tail_pos, 4) * factor
             tail_pos += 4
@@ -2080,6 +2246,11 @@ def _parse_standard_sor_events_with_meta(file_name: str, raw: bytes) -> tuple[li
             tail_pos += 4
             if 0 < parsed_total < 200:
                 total_loss_db = round(parsed_total, 3)
+                tail_validation_status = 'pending_attenuation'
+                tail_rejection_reason = ''
+            else:
+                tail_validation_status = 'rejected'
+                tail_rejection_reason = f'Tail suy hao tổng {parsed_total:.3f} dB nằm ngoài dải 0-200 dB.'
             if tail_loss_end_km > 0:
                 parsed_end_distance_km = round(tail_loss_end_km, 6)
 
@@ -2098,19 +2269,29 @@ def _parse_standard_sor_events_with_meta(file_name: str, raw: bytes) -> tuple[li
                 parsed_att = float(total_loss_db) / float(end_distance_km)
                 if not (0.01 <= parsed_att <= 1.00):
                     total_loss_db = None
+                    tail_validation_status = 'rejected'
+                    tail_rejection_reason = (
+                        f'Tail có suy hao trung bình {parsed_att:.3f} dB/km ngoài dải parser 0.01-1.00 dB/km.'
+                    )
+                else:
+                    tail_validation_status = 'accepted'
+                    total_loss_origin = 'tail_validated'
 
             if total_loss_db is None and end_distance_km not in (None, 0):
                 stv_like_total = _estimate_stv_like_total_loss_from_standard_sor(rows, end_distance_km)
                 if stv_like_total is not None:
                     total_loss_db = stv_like_total
+                    total_loss_origin = 'stv_like_fallback'
                 else:
                     route_total = _estimate_route_total_loss_from_standard_sor(rows, end_distance_km)
                     if route_total is not None:
                         total_loss_db = route_total
+                        total_loss_origin = 'route_fallback'
                     else:
                         heuristic_total = _estimate_total_loss_from_standard_sor_heuristic(rows)
                         if heuristic_total is not None:
                             total_loss_db = heuristic_total
+                            total_loss_origin = 'heuristic_fallback'
 
             for row in reversed(rows):
                 if row.event_type == 'Fiber End':
@@ -2122,6 +2303,10 @@ def _parse_standard_sor_events_with_meta(file_name: str, raw: bytes) -> tuple[li
         meta = {
             'length_km': round(end_distance_km, 3) if end_distance_km is not None else None,
             'total_loss_db': total_loss_db,
+            'total_loss_origin': total_loss_origin,
+            'tail_total_loss_db': tail_total_loss_db,
+            'tail_validation_status': tail_validation_status,
+            'tail_rejection_reason': tail_rejection_reason,
             'orl_db': round(_orl_db, 3) if '_orl_db' in locals() and isinstance(_orl_db, (int, float)) and 0 < float(_orl_db) < 100 else None,
             'graph_end_km': datapts_meta.get('graph_end_km') if datapts_meta else None,
             'graph_curve_max_km': datapts_meta.get('graph_curve_max_km') if datapts_meta else (round(fxd['range_km'], 3) if fxd.get('range_km') else None),
@@ -2129,6 +2314,15 @@ def _parse_standard_sor_events_with_meta(file_name: str, raw: bytes) -> tuple[li
             'parse_mode': 'standard_sor_keyevents',
             'fiber_label': fiber_label,
         }
+        if datapts_meta and datapts_meta.get('trace_values_db') is not None:
+            # Retain the existing compact array only until summarize_file can use
+            # it for a confidence check. summarize_file always releases it.
+            meta.update({
+                'trace_values_db': datapts_meta.get('trace_values_db'),
+                'trace_range_km': datapts_meta.get('trace_range_km'),
+                'trace_calibrated_db': datapts_meta.get('trace_calibrated_db', True),
+                'trace_source': datapts_meta.get('trace_source') or 'SOR DataPts',
+            })
         return rows, meta
     except Exception:
         return [], None
@@ -3583,6 +3777,70 @@ def extract_raw_event_rows(file_name: str, raw: bytes) -> list[dict]:
     return rows
 
 
+def _standard_sor_trace_total_loss_candidate(
+    file_name: str,
+    raw: bytes,
+    rows: list[EventRow],
+    sor_meta: Optional[dict],
+    length_km: Optional[float],
+    current_total_loss_db: Optional[float],
+) -> dict:
+    """Fit the full SOR span only when DataPts and its km axis are trustworthy."""
+    result = {'total_loss_db': None, 'confidence': 'none', 'reason': 'Không có raw trace DataPts.'}
+    if not sor_meta or sor_meta.get('trace_values_db') is None or length_km in (None, 0):
+        return result
+    context = _TotalLossTraceContext(
+        total_loss_db=current_total_loss_db,
+        length_km=length_km,
+        end_distance_km=length_km,
+        graph_end_km=sor_meta.get('graph_end_km'),
+        graph_curve_max_km=sor_meta.get('graph_curve_max_km'),
+    )
+    try:
+        trace_series = _extract_raw_trace_series(file_name, raw, context, None, sor_meta)
+        if not trace_series:
+            result['reason'] = 'DataPts không tạo được trace series hợp lệ.'
+            return result
+        fit = _fit_raw_trace_section(
+            trace_series,
+            rows,
+            file_name,
+            0,
+            0.0,
+            float(length_km),
+        )
+        loss = fit.loss_db
+        attenuation = fit.attenuation_dbkm
+        r2 = fit.r2
+        rms = fit.rms_residual_db
+        if (
+            isinstance(loss, (int, float))
+            and float(loss) > 0
+            and isinstance(attenuation, (int, float))
+            and 0.01 <= float(attenuation) <= 1.20
+            and isinstance(r2, (int, float)) and float(r2) >= 0.95
+            and isinstance(rms, (int, float)) and float(rms) <= 0.12
+            and fit.fit_mode == 'exact_raw_fit'
+        ):
+            result.update({
+                'total_loss_db': round(float(loss), 3),
+                'confidence': 'high',
+                'reason': f'Raw trace fit đạt R²={float(r2):.3f}, RMS={float(rms):.3f} dB.',
+            })
+        else:
+            result['reason'] = (
+                f'Raw trace không đạt cổng tự động: mode={fit.fit_mode}, '
+                f'R²={r2}, RMS={rms}, confidence={fit.confidence}.'
+            )
+        return result
+    except Exception as exc:
+        result['reason'] = f'Không dùng raw trace do {type(exc).__name__}.'
+        return result
+    finally:
+        # Never retain tens of thousands of samples in long-lived batch contexts.
+        sor_meta.pop('trace_values_db', None)
+
+
 def summarize_file(file_name: str, raw: bytes, parsed_context: Optional[tuple] = None) -> FileSummary:
     ext = Path(file_name).suffix.lower()
     if parsed_context is None:
@@ -3610,7 +3868,14 @@ def summarize_file(file_name: str, raw: bytes, parsed_context: Optional[tuple] =
         fiber = Path(file_name).stem
 
     total_loss_db = fiber_end.total_loss_db if fiber_end.total_loss_db is not None else (sor_meta.get('total_loss_db') if sor_meta else None)
-    total_loss_source = 'Tóm tắt SOR / điểm cuối sợi' if total_loss_db is not None else ''
+    sor_total_loss_origin = str(sor_meta.get('total_loss_origin') or '') if sor_meta else ''
+    sor_source_labels = {
+        'tail_validated': 'Tail KeyEvents SOR đã kiểm tra',
+        'stv_like_fallback': 'Ước tính STV-like sau khi loại tail SOR',
+        'route_fallback': 'Ước tính theo tuyến sau khi loại tail SOR',
+        'heuristic_fallback': 'Ước tính heuristic sau khi loại tail SOR',
+    }
+    total_loss_source = sor_source_labels.get(sor_total_loss_origin, 'Tóm tắt SOR / điểm cuối sợi') if total_loss_db is not None else ''
     total_loss_selection_reason = ''
     route_corrected_total_loss_db = None
     msor_direct_summary = None
@@ -3655,28 +3920,74 @@ def summarize_file(file_name: str, raw: bytes, parsed_context: Optional[tuple] =
             r'distance[^\d]*(\d+(?:\.\d+)?)\s*(km|m)?',
         ]))
     if ext == '.sor' and length_km not in (None, 0):
-        route_total_loss_db = _estimate_route_total_loss_from_standard_sor(filtered, length_km)
+        route_estimate = _estimate_route_total_loss_details_from_standard_sor(filtered, length_km)
+        route_total_loss_db = route_estimate.total_loss_db
+        terminal_anomaly = _find_preterminal_total_loss_anomaly(filtered, length_km)
+        trace_check = {'total_loss_db': None, 'confidence': 'none', 'reason': ''}
+        if route_estimate.confidence != 'high':
+            trace_check = _standard_sor_trace_total_loss_candidate(
+                file_name,
+                raw,
+                filtered,
+                sor_meta,
+                length_km,
+                total_loss_db,
+            )
+        elif sor_meta:
+            sor_meta.pop('trace_values_db', None)
+
+        route_selectable = route_estimate.auto_selectable
+        if route_estimate.confidence == 'medium' and trace_check.get('confidence') == 'high' and route_total_loss_db is not None:
+            trace_total = float(trace_check['total_loss_db'])
+            agreement_limit = max(0.5, 0.15 * max(abs(trace_total), abs(float(route_total_loss_db))))
+            route_selectable = abs(trace_total - float(route_total_loss_db)) <= agreement_limit
+
+        fallback_origin = sor_total_loss_origin in {
+            'stv_like_fallback', 'route_fallback', 'heuristic_fallback'
+        }
+        if (
+            fallback_origin
+            and terminal_anomaly is not None
+            and route_estimate.confidence == 'low'
+        ):
+            total_loss_db = None
+            total_loss_source = ''
+            total_loss_selection_reason = (
+                f'Không tự động chọn suy hao tổng: fallback chứa sự kiện bất thường '
+                f'{float(terminal_anomaly["loss_db"]):.3f} dB gần cuối tuyến, trong khi ứng viên tuyến chỉ phủ '
+                f'{route_estimate.slope_coverage_ratio:.1%} chiều dài slope hợp lệ '
+                f'(confidence={route_estimate.confidence}). {trace_check.get("reason") or ""}'.strip()
+            )
+
         if route_total_loss_db is not None:
             route_corrected_total_loss_db = round(route_total_loss_db, 3)
             has_strong_keyevents_summary = bool(
                 sor_meta
                 and sor_meta.get('parse_mode') == 'standard_sor_keyevents'
-                and sor_meta.get('total_loss_db') not in (None, 0)
+                and sor_meta.get('total_loss_origin') == 'tail_validated'
+                and sor_meta.get('tail_validation_status') == 'accepted'
             )
             if total_loss_db in (None, 0):
-                total_loss_db = route_total_loss_db
-                total_loss_source = 'Hiệu chỉnh theo tuyến'
-                total_loss_selection_reason = (
-                    'Không đọc được suy hao tổng hợp lệ từ tóm tắt SOR; '
-                    f'chọn giá trị ước tính theo tuyến {route_total_loss_db:.3f} dB.'
-                )
+                if route_selectable and not total_loss_selection_reason:
+                    total_loss_db = route_total_loss_db
+                    total_loss_source = 'Hiệu chỉnh theo tuyến'
+                    total_loss_selection_reason = (
+                        'Không đọc được suy hao tổng hợp lệ từ tóm tắt SOR; '
+                        f'chọn giá trị ước tính theo tuyến {route_total_loss_db:.3f} dB '
+                        f'với độ phủ slope {route_estimate.slope_coverage_ratio:.1%}.'
+                    )
+                elif not total_loss_selection_reason:
+                    total_loss_selection_reason = (
+                        f'Không tự động dùng ứng viên tuyến {route_total_loss_db:.3f} dB vì độ phủ slope '
+                        f'{route_estimate.slope_coverage_ratio:.1%}, confidence={route_estimate.confidence}. '
+                        f'{trace_check.get("reason") or ""}'.strip()
+                    )
             else:
                 try:
                     parsed_att = float(total_loss_db) / float(length_km)
                 except Exception:
                     parsed_att = None
                 route_att = route_total_loss_db / float(length_km)
-                preterminal_reflective_loss = _find_preterminal_reflective_connector_loss(filtered, length_km)
                 suspicious_reasons: list[str] = []
                 if parsed_att is None:
                     suspicious_reasons.append('không tính được suy hao trung bình từ giá trị đã đọc')
@@ -3694,32 +4005,45 @@ def summarize_file(file_name: str, raw: bytes, parsed_context: Optional[tuple] =
                             f'suy hao trung bình đã đọc {parsed_att:.3f} dB/km thấp bất thường so với ước tính tuyến {route_att:.3f} dB/km'
                         )
 
-                # Some standard SOR traces carry a tail-summary that includes a very large
-                # reflective connector right before the terminal fiber-end marker. That value
-                # makes route total loss and average attenuation look far too high in the
-                # Excel summary, even though the per-section attenuation is normal.
+                anomaly_loss = float(terminal_anomaly['loss_db']) if terminal_anomaly is not None else None
                 if (
-                    preterminal_reflective_loss is not None
-                    and preterminal_reflective_loss >= 5.0
+                    anomaly_loss is not None
                     and float(total_loss_db) > float(route_total_loss_db)
-                    and (float(total_loss_db) - float(route_total_loss_db)) >= max(4.0, 0.45 * preterminal_reflective_loss)
+                    and (float(total_loss_db) - float(route_total_loss_db)) >= max(4.0, 0.45 * anomaly_loss)
                     and parsed_att is not None
                     and parsed_att > max(route_att * 1.30, route_att + 0.08)
                 ):
                     suspicious_reasons.append(
-                        f'phát hiện đầu nối phản xạ {preterminal_reflective_loss:.3f} dB gần cuối tuyến làm tóm tắt SOR cao bất thường'
+                        f'phát hiện sự kiện bất thường {anomaly_loss:.3f} dB gần cuối tuyến '
+                        f'({terminal_anomaly.get("reason_code")}) làm tóm tắt SOR cao bất thường'
                     )
 
                 if suspicious_reasons:
-                    total_loss_db = route_total_loss_db
-                    total_loss_source = 'Hiệu chỉnh theo tuyến'
-                    total_loss_selection_reason = (
-                        f'Chọn ước tính theo tuyến {route_total_loss_db:.3f} dB vì '
-                        + '; '.join(suspicious_reasons)
-                        + '.'
-                    )
+                    if route_selectable:
+                        total_loss_db = route_total_loss_db
+                        total_loss_source = 'Hiệu chỉnh theo tuyến'
+                        total_loss_selection_reason = (
+                            f'Chọn ước tính theo tuyến {route_total_loss_db:.3f} dB '
+                            f'(độ phủ slope {route_estimate.slope_coverage_ratio:.1%}) vì '
+                            + '; '.join(suspicious_reasons)
+                            + '.'
+                        )
+                    elif fallback_origin or parsed_att is None or not (0.01 <= parsed_att <= 1.20):
+                        total_loss_db = None
+                        total_loss_source = ''
+                        total_loss_selection_reason = (
+                            'Không có giá trị suy hao tổng đủ tin cậy: '
+                            + '; '.join(suspicious_reasons)
+                            + f'; ứng viên tuyến chỉ phủ {route_estimate.slope_coverage_ratio:.1%} slope hợp lệ '
+                            f'(confidence={route_estimate.confidence}). {trace_check.get("reason") or ""}'.strip()
+                        )
+                    else:
+                        total_loss_selection_reason = (
+                            f'Giữ tail đã kiểm tra {float(total_loss_db):.3f} dB vì ứng viên tuyến '
+                            f'không đủ confidence để thay thế ({route_estimate.slope_coverage_ratio:.1%} slope hợp lệ).'
+                        )
 
-            if _should_force_route_corrected_total_for_standard_sor(
+            if route_selectable and _should_force_route_corrected_total_for_standard_sor(
                 summary_total_loss_db=parsed_total_loss_db,
                 route_total_loss_db=route_total_loss_db,
                 length_km=length_km,
@@ -3732,6 +4056,9 @@ def summarize_file(file_name: str, raw: bytes, parsed_context: Optional[tuple] =
                     f'Chọn ước tính theo tuyến {route_total_loss_db:.3f} dB vì tóm tắt SOR '
                     'có suy hao điểm cuối hoặc độ dốc điểm cuối bất thường.'
                 )
+
+    if sor_meta:
+        sor_meta.pop('trace_values_db', None)
 
     if not total_loss_selection_reason:
         if total_loss_db is None:
@@ -3975,57 +4302,14 @@ def _clip_overlap(start_a: float, end_a: float, start_b: float, end_b: float) ->
 
 
 def _standard_sor_discrete_loss_allowed(row: EventRow, length_km: float, ordered: list[EventRow], idx: int, cluster_gap_km: float, endpoint_zone_km: float) -> bool:
-    loss = row.loss_db
-    if loss is None:
-        return False
-    loss_f = float(loss)
-    if loss_f <= 0:
-        return False
-
-    dist = float(row.distance_km or 0.0)
-    et = (row.event_type or '').strip()
-    near_start = dist <= endpoint_zone_km
-    near_end = (float(length_km) - dist) <= endpoint_zone_km
-    terminal = _is_standard_sor_terminal_event(row)
-    reflective = _is_standard_sor_reflective_event(row)
-
-    if terminal:
-        return False
-    if et == 'First Connector':
-        return False
-    if reflective and (near_start or near_end):
-        return False
-    if et == 'Connector' and reflective and loss_f > 1.0:
-        return False
-    if et == 'Connector' and near_start and loss_f > 0.75:
-        return False
-
-    prev_loss = None
-    next_loss = None
-    prev_gap = None
-    next_gap = None
-    if idx > 0:
-        prev_row = ordered[idx - 1]
-        prev_gap = dist - float(prev_row.distance_km or 0.0)
-        prev_loss = float(prev_row.loss_db) if prev_row.loss_db is not None else None
-    if idx + 1 < len(ordered):
-        next_row = ordered[idx + 1]
-        next_gap = float(next_row.distance_km or 0.0) - dist
-        next_loss = float(next_row.loss_db) if next_row.loss_db is not None else None
-
-    clustered_high_loss = False
-    if loss_f > 1.0 and not reflective:
-        if near_end or near_start:
-            clustered_high_loss = True
-        if prev_gap is not None and prev_gap <= cluster_gap_km and prev_loss is not None and prev_loss > 0.8:
-            clustered_high_loss = True
-        if next_gap is not None and next_gap <= cluster_gap_km and next_loss is not None and next_loss > 0.8:
-            clustered_high_loss = True
-        if loss_f >= 3.0:
-            clustered_high_loss = True
-    if clustered_high_loss:
-        return False
-    return True
+    return _standard_sor_event_loss_decision(
+        row,
+        float(length_km),
+        ordered,
+        idx,
+        float(cluster_gap_km),
+        float(endpoint_zone_km),
+    ).allowed
 
 
 def _estimate_segment_loss_standard_sor(rows: list[EventRow], start_km: float, end_km: float, route_length_km: Optional[float]) -> tuple[Optional[float], str]:

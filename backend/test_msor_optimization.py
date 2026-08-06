@@ -185,6 +185,131 @@ class TotalLossSelectionTests(unittest.TestCase):
         self.assertEqual(method, 'span_attenuation_estimate')
 
 
+class StandardSorTotalLossCorrectionTests(unittest.TestCase):
+    @staticmethod
+    def _event(
+        event_no: int,
+        event_type: str,
+        distance_km: float,
+        loss_db: Optional[float],
+        slope_dbkm: Optional[float],
+        label: str,
+        *,
+        reflectance_db: Optional[float] = 0.0,
+        total_loss_db: Optional[float] = None,
+    ) -> converter.EventRow:
+        return converter.EventRow(
+            file_name='fixture.sor',
+            event_no=str(event_no),
+            event_type=event_type,
+            distance_m=distance_km * 1000.0,
+            distance_km=distance_km,
+            wavelength_nm='1550',
+            loss_db=loss_db,
+            reflectance_db=reflectance_db,
+            slope_dbkm=slope_dbkm,
+            total_loss_db=total_loss_db,
+            note_original='',
+            label=label,
+        )
+
+    def test_shared_filter_rejects_vendor_sentinel_in_stv_and_route(self) -> None:
+        rows = [
+            self._event(1, 'First Connector', 0.020, 0.0, 0.0, '1F9999LS'),
+            self._event(2, 'Connector', 0.654, 0.0, 0.133, '1F9999LS', reflectance_db=-67.0),
+            self._event(3, 'Splice', 6.269, 30.0, 32.767, '0F9999LS'),
+            self._event(4, 'Fiber End', 6.289, 0.0, 0.0, '1E9999LS', reflectance_db=-87.0),
+        ]
+
+        route = converter._estimate_route_total_loss_details_from_standard_sor(rows, 6.289)
+        stv = converter._estimate_stv_like_total_loss_from_standard_sor(rows, 6.289)
+        anomaly = converter._find_preterminal_total_loss_anomaly(rows, 6.289)
+
+        self.assertEqual(route.total_loss_db, 0.084)
+        self.assertEqual(stv, 0.084)
+        self.assertEqual(route.rejected_artifact_count, 1)
+        self.assertEqual(route.confidence, 'low')
+        self.assertLess(route.slope_coverage_ratio, 0.11)
+        self.assertEqual(anomaly['reason_code'], 'sentinel_slope_high_loss')
+
+    def test_low_coverage_fallback_is_not_auto_selected(self) -> None:
+        rows = [
+            self._event(1, 'First Connector', 0.020, 0.0, 0.0, '1F9999LS'),
+            self._event(2, 'Connector', 0.654, 0.0, 0.133, '1F9999LS', reflectance_db=-67.0),
+            self._event(3, 'Splice', 6.269, 30.0, 32.767, '0F9999LS'),
+            self._event(4, 'Fiber End', 6.289, 0.0, 0.0, '1E9999LS', reflectance_db=-87.0, total_loss_db=0.084),
+        ]
+        meta = {
+            'length_km': 6.289,
+            'total_loss_db': 0.084,
+            'total_loss_origin': 'stv_like_fallback',
+            'tail_validation_status': 'rejected',
+            'parse_mode': 'standard_sor_keyevents',
+            'wavelength_display': '1550 nm',
+        }
+
+        summary = converter.summarize_file(
+            'fixture.sor',
+            b'',
+            parsed_context=(rows, None, meta, 'standard_sor_keyevents', ''),
+        )
+
+        self.assertIsNone(summary.total_loss_db)
+        self.assertEqual(summary.route_corrected_total_loss_db, 0.084)
+        self.assertIn('10.1%', summary.total_loss_selection_reason)
+
+    def test_non_reflective_terminal_sentinel_can_correct_validated_tail(self) -> None:
+        rows = [
+            self._event(1, 'First Connector', 0.020, 0.0, 0.0, '1F9999LS'),
+            self._event(2, 'Splice', 45.000, 0.5, 0.2, '0F9999LS'),
+            self._event(3, 'Splice', 49.980, 30.0, 32.767, '0F9999LS'),
+            self._event(4, 'Fiber End', 50.000, 0.0, 0.0, '1E9999LS', reflectance_db=-87.0, total_loss_db=58.0),
+        ]
+        meta = {
+            'length_km': 50.0,
+            'total_loss_db': 58.0,
+            'total_loss_origin': 'tail_validated',
+            'tail_validation_status': 'accepted',
+            'parse_mode': 'standard_sor_keyevents',
+            'wavelength_display': '1550 nm',
+        }
+
+        summary = converter.summarize_file(
+            'fixture.sor',
+            b'',
+            parsed_context=(rows, None, meta, 'standard_sor_keyevents', ''),
+        )
+
+        self.assertEqual(summary.route_corrected_total_loss_db, 9.496)
+        self.assertEqual(summary.total_loss_db, 9.496)
+        self.assertIn('sentinel_slope_high_loss', summary.total_loss_selection_reason)
+
+    def test_fallback_provenance_does_not_receive_strong_tail_protection(self) -> None:
+        rows = [
+            self._event(1, 'First Connector', 0.020, 0.0, 0.0, '1F9999LS'),
+            self._event(2, 'Splice', 49.980, 0.5, 0.2, '0F9999LS'),
+            self._event(3, 'Fiber End', 50.000, 0.0, 0.0, '1E9999LS', reflectance_db=-87.0, total_loss_db=40.0),
+        ]
+        meta = {
+            'length_km': 50.0,
+            'total_loss_db': 40.0,
+            'total_loss_origin': 'stv_like_fallback',
+            'tail_validation_status': 'rejected',
+            'parse_mode': 'standard_sor_keyevents',
+            'wavelength_display': '1550 nm',
+        }
+
+        summary = converter.summarize_file(
+            'fixture.sor',
+            b'',
+            parsed_context=(rows, None, meta, 'standard_sor_keyevents', ''),
+        )
+
+        self.assertEqual(summary.route_corrected_total_loss_db, 10.492)
+        self.assertEqual(summary.total_loss_db, 10.492)
+        self.assertEqual(summary.loss_source_used, 'Hiệu chỉnh theo tuyến')
+
+
 class SorParseReuseTests(unittest.TestCase):
     def test_orl_extractors_use_preparsed_sor_metadata(self) -> None:
         meta = {"orl_db": 31.25}
