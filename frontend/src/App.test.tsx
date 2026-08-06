@@ -61,6 +61,21 @@ test('renders the trace export screen', () => {
   expect(
     screen.getByRole('heading', { name: /Cấu hình Xuất Excel Tuyến/i }),
   ).toBeInTheDocument();
+  expect(
+    screen.queryByRole('button', { name: /Nạp Trace Mới/i }),
+  ).not.toBeInTheDocument();
+});
+
+test('shows route graph navigation in its own header', () => {
+  render(<App />);
+  openRouteGraph();
+
+  expect(
+    screen.getByRole('button', { name: /Trở về Menu/i }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole('heading', { name: /Đồ thị tuyến/i }),
+  ).toBeInTheDocument();
 });
 
 test('automatically analyzes the Excel input batch for the route graph', async () => {

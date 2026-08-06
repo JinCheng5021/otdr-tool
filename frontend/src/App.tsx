@@ -39,23 +39,31 @@ const App: React.FC = () => {
     <div
       className={
         activeTab === 'current'
-          ? 'w-screen h-screen overflow-y-auto relative bg-surface'
+          ? 'w-screen h-screen overflow-hidden bg-surface flex flex-col'
           : 'hidden'
       }
     >
-        <button 
+      <header className="h-14 shrink-0 flex items-center gap-3 px-4 bg-white border-b border-outline-variant shadow-sm z-20">
+        <button
           onClick={() => setActiveTab('traceviewer')}
-          className="absolute top-4 left-4 z-[9999] bg-white/90 backdrop-blur p-2 rounded-full shadow-lg border border-outline-variant text-industrial-navy hover:scale-110 transition-transform flex items-center justify-center"
+          className="h-10 px-3 flex items-center gap-2 rounded-lg border border-outline-variant bg-white text-industrial-navy shadow-sm hover:bg-surface-variant hover:border-primary/30 transition-colors"
           title="Trở về Menu"
+          aria-label="Trở về Menu"
         >
-          <span className="material-symbols-outlined">arrow_back</span>
+          <span className="material-symbols-outlined text-[22px]">arrow_back</span>
+          <span className="text-sm font-semibold">Quay lại</span>
         </button>
+        <div className="h-6 w-px bg-outline-variant" aria-hidden="true"></div>
+        <h1 className="text-base font-semibold text-on-surface">Đồ thị tuyến</h1>
+      </header>
+      <div className="flex-1 min-h-0 overflow-hidden">
         <CurrentApp
           isActive={activeTab === 'current'}
           inputFiles={inputBatch.files}
           inputRevision={inputBatch.revision}
           replaceInputFiles={replaceInputFiles}
         />
+      </div>
     </div>
   );
 
@@ -86,11 +94,6 @@ const App: React.FC = () => {
         {/* NavigationDrawer (Desktop Only) */}
         <aside className="hidden md:flex flex-col gap-4 p-6 bg-surface-container-low border-r border-outline-variant w-[280px] sticky top-14 h-[calc(100vh-56px)] shrink-0">
           <div className="flex flex-col gap-1">
-            <button className="flex items-center gap-3 px-4 py-2.5 rounded-lg bg-primary text-white shadow-lg shadow-primary/20 btn-pro font-semibold">
-              <span className="material-symbols-outlined text-[20px]">upload</span>
-              <span className="text-sm">Nạp Trace Mới</span>
-            </button>
-            <div className="h-px bg-outline-variant my-4"></div>
             <nav className="flex flex-col gap-1">
               <button 
                 onClick={() => setActiveTab('current')} 

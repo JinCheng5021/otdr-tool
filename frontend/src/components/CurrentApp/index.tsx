@@ -195,7 +195,7 @@ const CurrentApp: React.FC<CurrentAppProps> = ({
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
-      style={{height: '100%'}}
+      style={{ height: '100%', minHeight: 0 }}
     >
       {isDraggingGlobal && (
         <div className="global-drag-overlay">
