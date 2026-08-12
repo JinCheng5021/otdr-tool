@@ -9,9 +9,6 @@ import {
 } from '@testing-library/react';
 import App from './App';
 
-jest.mock('@vercel/blob/client', () => ({ upload: jest.fn() }), {
-  virtual: true,
-});
 jest.mock('axios', () => ({
   __esModule: true,
   default: {

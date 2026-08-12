@@ -9,6 +9,7 @@ from unittest.mock import patch
 from fastapi.responses import Response
 
 os.environ.setdefault("VERCEL", "1")
+os.environ.setdefault("R2_SECRET_ACCESS_KEY", "test-r2-session-secret")
 
 from . import app_trace
 from .blob_storage import StoredBlob
@@ -26,6 +27,7 @@ INPUT_MANIFEST = json.dumps(
         }
     ]
 )
+OUTPUT_PATH = f"otdr/output/2026/07/22/{UPLOAD_ID}/FastReporter_test.xlsx"
 
 CONVERT_OPTIONS = {
     "threshold_db": 0.11,
@@ -246,6 +248,89 @@ class FakeJsonRequest:
         return self.body
 
 
+class FakeR2SigningStorage:
+    instances: list["FakeR2SigningStorage"] = []
+
+    def __init__(self) -> None:
+        self.aborted = []
+        self.completed = []
+        self.__class__.instances.append(self)
+
+    def __enter__(self) -> "FakeR2SigningStorage":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+    def create_presigned_upload_url(
+        self,
+        pathname: str,
+        *,
+        content_type: str,
+        expected_size: int,
+    ) -> str:
+        return f"https://account.r2.cloudflarestorage.com/{pathname}?single=1"
+
+    def create_multipart_upload(
+        self,
+        pathname: str,
+        *,
+        content_type: str,
+        expected_size: int,
+    ) -> str:
+        return "multipart-id"
+
+    def create_presigned_part_url(
+        self,
+        pathname: str,
+        multipart_upload_id: str,
+        part_number: int,
+        part_size: int,
+    ) -> str:
+        return (
+            f"https://account.r2.cloudflarestorage.com/{pathname}"
+            f"?partNumber={part_number}"
+        )
+
+    def complete_multipart_upload(
+        self,
+        pathname: str,
+        multipart_upload_id: str,
+        parts: list[dict],
+    ) -> StoredBlob:
+        self.completed.append((pathname, multipart_upload_id, parts))
+        return StoredBlob(
+            pathname=pathname,
+            url=f"r2://bucket/{pathname}",
+            download_url=f"r2://bucket/{pathname}",
+            content_type="application/octet-stream",
+            size=(
+                app_trace.MULTIPART_UPLOAD_THRESHOLD_BYTES + 1
+                if len(parts) > 1
+                else len(INPUT_BYTES)
+            ),
+        )
+
+    def abort_multipart_upload(
+        self,
+        pathname: str,
+        multipart_upload_id: str,
+    ) -> None:
+        self.aborted.append((pathname, multipart_upload_id))
+
+    def metadata(self, pathname: str) -> StoredBlob:
+        return StoredBlob(
+            pathname=pathname,
+            url=f"r2://bucket/{pathname}",
+            download_url=f"r2://bucket/{pathname}",
+            content_type="application/octet-stream",
+            size=len(INPUT_BYTES),
+        )
+
+    def create_presigned_download_url(self, pathname: str) -> str:
+        return f"https://account.r2.cloudflarestorage.com/{pathname}?get=1"
+
+
 class BlobInputSessionTests(unittest.IsolatedAsyncioTestCase):
     async def test_session_selects_one_type_and_ignores_other_files(self) -> None:
         response = await app_trace.create_blob_input(
@@ -267,6 +352,158 @@ class BlobInputSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["files"][0]["original_name"], "trace.sor")
         self.assertEqual(payload["files"][0]["size"], 300)
         self.assertTrue(payload["files"][0]["pathname"].endswith("000001-trace.sor"))
+        self.assertTrue(payload["upload_authorization"])
+        self.assertGreater(payload["authorization_valid_until"], 0)
+
+
+class R2SigningEndpointTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        FakeR2SigningStorage.instances.clear()
+
+    def upload_request(self, size: int) -> FakeJsonRequest:
+        upload_authorization, _valid_until = (
+            app_trace._create_storage_upload_authorization(
+                UPLOAD_ID,
+                [{"pathname": INPUT_PATH, "size": size}],
+            )
+        )
+        return FakeJsonRequest(
+            {
+                "pathname": INPUT_PATH,
+                "upload_id": UPLOAD_ID,
+                "size": size,
+                "content_type": "application/octet-stream",
+                "upload_authorization": upload_authorization,
+            }
+        )
+
+    async def test_prepare_single_upload_preserves_path_size_and_headers(self) -> None:
+        with patch.object(
+            app_trace,
+            "PrivateBlobStorage",
+            FakeR2SigningStorage,
+        ):
+            response = await app_trace.prepare_storage_upload(
+                self.upload_request(len(INPUT_BYTES))
+            )
+
+        payload = json.loads(response.body)
+        self.assertEqual(payload["mode"], "single")
+        self.assertEqual(payload["pathname"], INPUT_PATH)
+        self.assertEqual(payload["size"], len(INPUT_BYTES))
+        self.assertEqual(
+            payload["required_headers"],
+            {
+                "Content-Type": "application/octet-stream",
+                "If-None-Match": "*",
+            },
+        )
+
+    async def test_prepare_large_upload_returns_complete_ordered_part_plan(self) -> None:
+        size = app_trace.MULTIPART_UPLOAD_THRESHOLD_BYTES + 1
+        with patch.object(
+            app_trace,
+            "PrivateBlobStorage",
+            FakeR2SigningStorage,
+        ):
+            response = await app_trace.prepare_storage_upload(
+                self.upload_request(size)
+            )
+
+        payload = json.loads(response.body)
+        self.assertEqual(payload["mode"], "multipart")
+        self.assertEqual(payload["multipart_upload_id"], "multipart-id")
+        self.assertEqual(
+            [part["part_number"] for part in payload["parts"]],
+            list(range(1, len(payload["parts"]) + 1)),
+        )
+        self.assertEqual(sum(part["size"] for part in payload["parts"]), size)
+
+    async def test_multipart_part_url_is_signed_just_in_time(self) -> None:
+        size = app_trace.MULTIPART_UPLOAD_THRESHOLD_BYTES + 1
+        request = self.upload_request(size)
+        request.body.update(
+            {
+                "multipart_upload_id": "multipart-id",
+                "part_number": 1,
+                "part_size": app_trace.MULTIPART_PART_SIZE_BYTES,
+            }
+        )
+        with patch.object(
+            app_trace,
+            "PrivateBlobStorage",
+            FakeR2SigningStorage,
+        ):
+            response = await app_trace.create_storage_multipart_part_url(
+                request
+            )
+
+        payload = json.loads(response.body)
+        self.assertEqual(payload["part_number"], 1)
+        self.assertEqual(payload["part_size"], app_trace.MULTIPART_PART_SIZE_BYTES)
+        self.assertIn("partNumber=1", payload["upload_url"])
+
+    async def test_signing_rejects_a_descriptor_not_in_the_session_token(self) -> None:
+        request = self.upload_request(len(INPUT_BYTES))
+        request.body["size"] = len(INPUT_BYTES) + 1
+        with patch.object(
+            app_trace,
+            "PrivateBlobStorage",
+            FakeR2SigningStorage,
+        ):
+            with self.assertRaises(app_trace.HTTPException) as raised:
+                await app_trace.prepare_storage_upload(request)
+
+        self.assertEqual(raised.exception.status_code, 400)
+        self.assertEqual(FakeR2SigningStorage.instances, [])
+
+    async def test_complete_multipart_requires_all_ordered_parts(self) -> None:
+        size = app_trace.MULTIPART_UPLOAD_THRESHOLD_BYTES + 1
+        part_count = (
+            size + app_trace.MULTIPART_PART_SIZE_BYTES - 1
+        ) // app_trace.MULTIPART_PART_SIZE_BYTES
+        request = self.upload_request(size)
+        request.body.update(
+            {
+                "multipart_upload_id": "multipart-id",
+                "parts": [
+                    {"part_number": number, "etag": f'"etag-{number}"'}
+                    for number in range(1, part_count + 1)
+                ],
+            }
+        )
+        with patch.object(
+            app_trace,
+            "PrivateBlobStorage",
+            FakeR2SigningStorage,
+        ):
+            response = await app_trace.complete_storage_multipart(request)
+
+        payload = json.loads(response.body)
+        self.assertEqual(payload["pathname"], INPUT_PATH)
+        self.assertEqual(payload["size"], size)
+        self.assertEqual(
+            len(FakeR2SigningStorage.instances[0].completed[0][2]),
+            part_count,
+        )
+
+    async def test_download_url_accepts_only_managed_xlsx_output(self) -> None:
+        with patch.object(
+            app_trace,
+            "PrivateBlobStorage",
+            FakeR2SigningStorage,
+        ):
+            response = await app_trace.create_storage_download_url(
+                FakeJsonRequest({"pathname": OUTPUT_PATH})
+            )
+        payload = json.loads(response.body)
+        self.assertIn("r2.cloudflarestorage.com", payload["download_url"])
+
+        with self.assertRaises(app_trace.HTTPException) as raised:
+            await app_trace.create_storage_download_url(
+                FakeJsonRequest({"pathname": INPUT_PATH})
+            )
+        self.assertEqual(raised.exception.status_code, 400)
 
 
 class ConvertContractTests(unittest.TestCase):

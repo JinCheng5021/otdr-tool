@@ -1,14 +1,14 @@
 import React, { useState, useRef } from 'react';
 import Modals from './Modals';
 import {
-  type BlobConversionResult,
+  type StorageConversionResult,
   type InputFileSelection,
   downloadFromSignedUrl,
-  parseBlobConversionResponse,
-  requestBlobInput,
+  parseStorageConversionResponse,
+  requestStorageInput,
   requestSignedDownload,
   selectInputFiles,
-  uploadFilesToBlob,
+  uploadFilesToStorage,
 } from './traceExport';
 
 const REPORT_PROCESSING_TIMEOUT_MS = 180 * 1000;
@@ -30,7 +30,7 @@ const TraceViewer: React.FC<TraceViewerProps> = ({
   // Status message
   const [status, setStatus] = useState<{ message: string; type: 'error' | 'success' | 'info' } | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [readyReport, setReadyReport] = useState<BlobConversionResult | null>(null);
+  const [readyReport, setReadyReport] = useState<StorageConversionResult | null>(null);
 
   // Settings Tabs
   const [activeTab, setActiveTab] = useState<'basic' | 'advanced'>('basic');
@@ -175,9 +175,9 @@ const TraceViewer: React.FC<TraceViewerProps> = ({
     try {
       const selection = selectInputFiles(files);
       const selectedFiles = selection.selectedFiles;
-      const session = await requestBlobInput(selectedFiles);
+      const session = await requestStorageInput(selectedFiles);
       setStatus({ message: 'Đang tải dữ liệu lên... 0%', type: 'info' });
-      await uploadFilesToBlob(selectedFiles, session, (percentage) => setStatus({
+      await uploadFilesToStorage(selectedFiles, session, (percentage) => setStatus({
         message: `Đang tải dữ liệu lên... ${percentage}%`,
         type: 'info',
       }));
@@ -244,7 +244,7 @@ const TraceViewer: React.FC<TraceViewerProps> = ({
       } finally {
         window.clearTimeout(timeoutId);
       }
-      const converted = await parseBlobConversionResponse(response);
+      const converted = await parseStorageConversionResponse(response);
       setReadyReport(converted);
       setStatus({ message: 'Đang tự động tải báo cáo...', type: 'info' });
       try {

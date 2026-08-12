@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 from datetime import datetime
 import hashlib
+import hmac
 import io
 import json
 import time
@@ -18,6 +20,10 @@ from typing import Iterable, List
 from .msor_converter import build_workbook_from_uploads
 from .blob_storage import (
     DEFAULT_MAX_DOWNLOAD_BYTES,
+    MULTIPART_PART_SIZE_BYTES,
+    MULTIPART_UPLOAD_THRESHOLD_BYTES,
+    PRESIGNED_DOWNLOAD_LIFETIME_SECONDS,
+    PRESIGNED_UPLOAD_LIFETIME_SECONDS,
     BlobStorageConfigurationError,
     BlobStorageError,
     BlobStorageNotFoundError,
@@ -29,9 +35,11 @@ from .blob_storage import (
     build_output_path,
     job_id_from_input_file_path,
     job_id_from_input_path,
+    job_id_from_output_path,
 )
 
 DB_FILE = "/tmp/export_history.db" if os.environ.get("VERCEL") else "export_history.db"
+STORAGE_SESSION_LIFETIME_SECONDS = 60 * 60
 
 def init_db():
     # Bỏ qua lỗi nếu hệ thống file hoàn toàn read-only và không có /tmp
@@ -1376,6 +1384,118 @@ HTML_PAGE = """<!DOCTYPE html>
 async def home() -> HTMLResponse:
     return HTMLResponse(content=HTML_PAGE)
 
+
+def _storage_session_secret() -> bytes:
+    secret = os.environ.get('R2_SECRET_ACCESS_KEY')
+    if not secret:
+        raise BlobStorageConfigurationError(
+            'Cloudflare R2 is not configured: missing R2_SECRET_ACCESS_KEY'
+        )
+    return hmac.digest(
+        secret.encode('utf-8'),
+        b'otdr-tool/storage-session/v1',
+        'sha256',
+    )
+
+
+def _base64url_encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode('ascii').rstrip('=')
+
+
+def _base64url_decode(value: str) -> bytes:
+    try:
+        return base64.b64decode(
+            value + ('=' * (-len(value) % 4)),
+            altchars=b'-_',
+            validate=True,
+        )
+    except (ValueError, TypeError) as exc:
+        raise BlobStorageError('storage upload authorization is invalid') from exc
+
+
+def _create_storage_upload_authorization(
+    upload_id: str,
+    files: list[dict],
+) -> tuple[str, int]:
+    expires_at = int(time.time()) + STORAGE_SESSION_LIFETIME_SECONDS
+    payload = {
+        'version': 1,
+        'upload_id': upload_id,
+        'expires_at': expires_at,
+        'files': [
+            {'pathname': item['pathname'], 'size': item['size']}
+            for item in files
+        ],
+    }
+    encoded_payload = _base64url_encode(
+        json.dumps(
+            payload,
+            ensure_ascii=True,
+            separators=(',', ':'),
+            sort_keys=True,
+        ).encode('utf-8')
+    )
+    signature = _base64url_encode(
+        hmac.digest(
+            _storage_session_secret(),
+            encoded_payload.encode('ascii'),
+            'sha256',
+        )
+    )
+    return f'{encoded_payload}.{signature}', expires_at * 1000
+
+
+def _validate_storage_upload_authorization(
+    body: dict,
+    *,
+    pathname: str,
+    upload_id: str,
+    size: int,
+) -> None:
+    token = body.get('upload_authorization')
+    if not isinstance(token, str) or not token or len(token) > 1_000_000:
+        raise BlobStorageError('storage upload authorization is missing or invalid')
+    try:
+        encoded_payload, encoded_signature = token.split('.', 1)
+    except ValueError as exc:
+        raise BlobStorageError('storage upload authorization is invalid') from exc
+    if not encoded_payload or not encoded_signature or '.' in encoded_signature:
+        raise BlobStorageError('storage upload authorization is invalid')
+
+    expected_signature = hmac.digest(
+        _storage_session_secret(),
+        encoded_payload.encode('ascii'),
+        'sha256',
+    )
+    supplied_signature = _base64url_decode(encoded_signature)
+    if not hmac.compare_digest(supplied_signature, expected_signature):
+        raise BlobStorageError('storage upload authorization is invalid')
+
+    try:
+        payload = json.loads(_base64url_decode(encoded_payload).decode('utf-8'))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise BlobStorageError('storage upload authorization is invalid') from exc
+    if (
+        not isinstance(payload, dict)
+        or payload.get('version') != 1
+        or payload.get('upload_id') != upload_id
+        or not isinstance(payload.get('expires_at'), int)
+        or isinstance(payload.get('expires_at'), bool)
+        or payload['expires_at'] < int(time.time())
+        or not isinstance(payload.get('files'), list)
+    ):
+        raise BlobStorageError('storage upload authorization is invalid or expired')
+    if not any(
+        isinstance(item, dict)
+        and item.get('pathname') == pathname
+        and item.get('size') == size
+        for item in payload['files']
+    ):
+        raise BlobStorageError(
+            'storage upload descriptor is not authorized for this session'
+        )
+
+
 @app.post('/api/blob-input')
 async def create_blob_input(request: Request) -> JSONResponse:
     try:
@@ -1455,6 +1575,12 @@ async def create_blob_input(request: Request) -> JSONResponse:
             start=1,
         )
     ]
+    try:
+        upload_authorization, authorization_valid_until = (
+            _create_storage_upload_authorization(upload_id, files)
+        )
+    except BlobStorageError as exc:
+        raise _blob_http_exception(exc) from exc
     return JSONResponse(
         {
             "upload_id": upload_id,
@@ -1462,6 +1588,8 @@ async def create_blob_input(request: Request) -> JSONResponse:
             "files": files,
             "ignored_count": len(raw_files) - len(selected),
             "maximum_total_size_in_bytes": DEFAULT_MAX_DOWNLOAD_BYTES,
+            "upload_authorization": upload_authorization,
+            "authorization_valid_until": authorization_valid_until,
         }
     )
 
@@ -1765,6 +1893,302 @@ def _blob_http_exception(exc: BlobStorageError) -> HTTPException:
     if isinstance(exc, BlobStorageOperationError):
         return HTTPException(status_code=502, detail=str(exc))
     return HTTPException(status_code=400, detail=str(exc))
+
+
+async def _storage_json_body(request: Request) -> dict:
+    try:
+        body = await request.json()
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail='Yêu cầu Cloudflare R2 không hợp lệ.',
+        ) from exc
+    if not isinstance(body, dict):
+        raise HTTPException(
+            status_code=400,
+            detail='Yêu cầu Cloudflare R2 không hợp lệ.',
+        )
+    return body
+
+
+def _validated_storage_upload_request(body: dict) -> tuple[str, str, int]:
+    pathname = body.get('pathname')
+    upload_id = body.get('upload_id')
+    size = body.get('size')
+    content_type = body.get('content_type')
+    if (
+        not isinstance(pathname, str)
+        or not isinstance(upload_id, str)
+        or not isinstance(size, int)
+        or isinstance(size, bool)
+        or size <= 0
+        or size > DEFAULT_MAX_DOWNLOAD_BYTES
+        or content_type != 'application/octet-stream'
+    ):
+        raise BlobStorageError('R2 upload descriptor is invalid')
+    try:
+        canonical_upload_id = str(UUID(upload_id))
+    except (ValueError, AttributeError, TypeError) as exc:
+        raise BlobStorageError('upload_id must be a valid UUID') from exc
+    if canonical_upload_id != upload_id:
+        raise BlobStorageError('upload_id must be a canonical UUID')
+    if job_id_from_input_file_path(pathname) != canonical_upload_id:
+        raise BlobStorageError(
+            'upload_id does not match the R2 input pathname'
+        )
+    _validate_storage_upload_authorization(
+        body,
+        pathname=pathname,
+        upload_id=canonical_upload_id,
+        size=size,
+    )
+    return pathname, canonical_upload_id, size
+
+
+def _validated_multipart_upload_id(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 2048
+        or any(ord(character) < 32 for character in value)
+    ):
+        raise BlobStorageError('multipart upload id is invalid')
+    return value
+
+
+def _expected_multipart_part_size(size: int, part_number: int) -> int:
+    if size <= MULTIPART_UPLOAD_THRESHOLD_BYTES:
+        raise BlobStorageError('multipart upload size is invalid')
+    part_count = (
+        size + MULTIPART_PART_SIZE_BYTES - 1
+    ) // MULTIPART_PART_SIZE_BYTES
+    if (
+        not isinstance(part_number, int)
+        or isinstance(part_number, bool)
+        or not 1 <= part_number <= part_count
+    ):
+        raise BlobStorageError('multipart part number is invalid')
+    start = (part_number - 1) * MULTIPART_PART_SIZE_BYTES
+    return min(MULTIPART_PART_SIZE_BYTES, size - start)
+
+
+@app.post('/api/storage/prepare-upload')
+async def prepare_storage_upload(request: Request) -> JSONResponse:
+    body = await _storage_json_body(request)
+    try:
+        pathname, _upload_id, size = _validated_storage_upload_request(body)
+        valid_until = int(time.time() * 1000) + (
+            PRESIGNED_UPLOAD_LIFETIME_SECONDS * 1000
+        )
+        with PrivateBlobStorage() as storage:
+            if size <= MULTIPART_UPLOAD_THRESHOLD_BYTES:
+                upload_url = storage.create_presigned_upload_url(
+                    pathname,
+                    content_type='application/octet-stream',
+                    expected_size=size,
+                )
+                return JSONResponse(
+                    {
+                        'mode': 'single',
+                        'pathname': pathname,
+                        'size': size,
+                        'upload_url': upload_url,
+                        'valid_until': valid_until,
+                        'required_headers': {
+                            'Content-Type': 'application/octet-stream',
+                            'If-None-Match': '*',
+                        },
+                    }
+                )
+
+            multipart_upload_id = storage.create_multipart_upload(
+                pathname,
+                content_type='application/octet-stream',
+                expected_size=size,
+            )
+            part_count = (
+                size + MULTIPART_PART_SIZE_BYTES - 1
+            ) // MULTIPART_PART_SIZE_BYTES
+            parts = [
+                {
+                    'part_number': part_number,
+                    'size': _expected_multipart_part_size(size, part_number),
+                }
+                for part_number in range(1, part_count + 1)
+            ]
+
+        return JSONResponse(
+            {
+                'mode': 'multipart',
+                'pathname': pathname,
+                'size': size,
+                'multipart_upload_id': multipart_upload_id,
+                'part_size': MULTIPART_PART_SIZE_BYTES,
+                'parts': parts,
+                'valid_until': valid_until,
+            }
+        )
+    except BlobStorageError as exc:
+        raise _blob_http_exception(exc) from exc
+
+
+@app.post('/api/storage/multipart-part-url')
+async def create_storage_multipart_part_url(request: Request) -> JSONResponse:
+    body = await _storage_json_body(request)
+    try:
+        pathname, _upload_id, size = _validated_storage_upload_request(body)
+        multipart_upload_id = _validated_multipart_upload_id(
+            body.get('multipart_upload_id')
+        )
+        part_number = body.get('part_number')
+        part_size = body.get('part_size')
+        expected_part_size = _expected_multipart_part_size(size, part_number)
+        if part_size != expected_part_size:
+            raise BlobStorageError('multipart part size is invalid')
+        with PrivateBlobStorage() as storage:
+            upload_url = storage.create_presigned_part_url(
+                pathname,
+                multipart_upload_id,
+                part_number,
+                part_size,
+            )
+        return JSONResponse(
+            {
+                'pathname': pathname,
+                'size': size,
+                'multipart_upload_id': multipart_upload_id,
+                'part_number': part_number,
+                'part_size': part_size,
+                'upload_url': upload_url,
+                'valid_until': int(time.time() * 1000) + (
+                    PRESIGNED_UPLOAD_LIFETIME_SECONDS * 1000
+                ),
+            }
+        )
+    except BlobStorageError as exc:
+        raise _blob_http_exception(exc) from exc
+
+
+@app.post('/api/storage/complete-multipart')
+async def complete_storage_multipart(request: Request) -> JSONResponse:
+    body = await _storage_json_body(request)
+    try:
+        pathname, _upload_id, size = _validated_storage_upload_request(body)
+        multipart_upload_id = _validated_multipart_upload_id(
+            body.get('multipart_upload_id')
+        )
+        raw_parts = body.get('parts')
+        expected_part_count = (
+            size + MULTIPART_PART_SIZE_BYTES - 1
+        ) // MULTIPART_PART_SIZE_BYTES
+        if (
+            size <= MULTIPART_UPLOAD_THRESHOLD_BYTES
+            or not isinstance(raw_parts, list)
+            or len(raw_parts) != expected_part_count
+        ):
+            raise BlobStorageError('multipart completion payload is invalid')
+
+        completed_parts = []
+        for expected_number, item in enumerate(raw_parts, start=1):
+            if not isinstance(item, dict):
+                raise BlobStorageError('multipart completion part is invalid')
+            part_number = item.get('part_number')
+            etag = item.get('etag')
+            if (
+                part_number != expected_number
+                or not isinstance(etag, str)
+                or not etag
+                or len(etag) > 256
+                or any(ord(character) < 32 for character in etag)
+            ):
+                raise BlobStorageError('multipart completion part is invalid')
+            completed_parts.append(
+                {'PartNumber': part_number, 'ETag': etag}
+            )
+
+        with PrivateBlobStorage() as storage:
+            stored = storage.complete_multipart_upload(
+                pathname,
+                multipart_upload_id,
+                completed_parts,
+            )
+            if stored.size != size:
+                try:
+                    storage.delete(pathname)
+                finally:
+                    raise BlobStorageSizeError(
+                        'completed R2 object size does not match the upload request'
+                    )
+
+        return JSONResponse(
+            {
+                'pathname': stored.pathname,
+                'size': stored.size,
+                'content_type': stored.content_type,
+            }
+        )
+    except BlobStorageError as exc:
+        raise _blob_http_exception(exc) from exc
+
+
+@app.post('/api/storage/abort-multipart')
+async def abort_storage_multipart(request: Request) -> JSONResponse:
+    body = await _storage_json_body(request)
+    try:
+        pathname, _upload_id, _size = _validated_storage_upload_request(body)
+        multipart_upload_id = _validated_multipart_upload_id(
+            body.get('multipart_upload_id')
+        )
+        with PrivateBlobStorage() as storage:
+            storage.abort_multipart_upload(pathname, multipart_upload_id)
+        return JSONResponse({'status': 'aborted', 'pathname': pathname})
+    except BlobStorageError as exc:
+        raise _blob_http_exception(exc) from exc
+
+
+@app.post('/api/storage/verify-upload')
+async def verify_storage_upload(request: Request) -> JSONResponse:
+    body = await _storage_json_body(request)
+    try:
+        pathname, _upload_id, size = _validated_storage_upload_request(body)
+        with PrivateBlobStorage() as storage:
+            stored = storage.metadata(pathname)
+        if stored.size != size:
+            raise BlobStorageSizeError(
+                'stored R2 object size does not match the upload request'
+            )
+        return JSONResponse(
+            {
+                'pathname': stored.pathname,
+                'size': stored.size,
+                'content_type': stored.content_type,
+            }
+        )
+    except BlobStorageError as exc:
+        raise _blob_http_exception(exc) from exc
+
+
+@app.post('/api/storage/download-url')
+async def create_storage_download_url(request: Request) -> JSONResponse:
+    body = await _storage_json_body(request)
+    pathname = body.get('pathname')
+    try:
+        if not isinstance(pathname, str):
+            raise BlobStorageError('R2 output pathname is invalid')
+        job_id_from_output_path(pathname)
+        with PrivateBlobStorage() as storage:
+            download_url = storage.create_presigned_download_url(pathname)
+        valid_until = int(time.time() * 1000) + (
+            PRESIGNED_DOWNLOAD_LIFETIME_SECONDS * 1000
+        )
+        return JSONResponse(
+            {
+                'download_url': download_url,
+                'valid_until': valid_until,
+            }
+        )
+    except BlobStorageError as exc:
+        raise _blob_http_exception(exc) from exc
 
 
 @app.post('/convert-from-blob')
