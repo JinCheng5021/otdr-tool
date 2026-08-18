@@ -9488,8 +9488,21 @@ def _stv_build_workbook(
     stv_total_core: Optional[int] = None,
     stv_used_core: Optional[int] = None,
 ) -> BytesIO:
-    wb = Workbook()
-    ws_main = wb.active
+    section_rows = sections or []
+    template_path = Path(__file__).with_name('2.xlsx')
+    if not template_path.exists():
+        raise FileNotFoundError('Không tìm thấy template Excel (2.xlsx) trong thư mục chương trình.')
+
+    # STV reuses the exact FastReporter Sections template and filler so both
+    # output modes expose the same section calculations and presentation.
+    wb = load_workbook(template_path)
+    for warn in _fr_validate_template_or_raise(template_path, wb):
+        _fr_log(logs if logs is not None else [], 'template', 'WARN', warn)
+    for worksheet in list(wb.worksheets):
+        if worksheet.title != 'Sections':
+            wb.remove(worksheet)
+
+    ws_main = wb.create_sheet(index=0)
     _stv_fill_main_sheet(
         ws_main,
         summaries,
@@ -9504,12 +9517,20 @@ def _stv_build_workbook(
         stv_total_core=stv_total_core,
         stv_used_core=stv_used_core,
     )
+    _fr_fill_sections(
+        wb['Sections'],
+        summaries,
+        contexts,
+        section_rows,
+        threshold_db,
+        section_match_tolerance_m=section_match_tolerance_m,
+        section_measurement_mode=section_measurement_mode,
+        section_threshold_db=section_threshold_db,
+    )
     ws_graph = wb.create_sheet('Kiểm tra đồ thị')
     _stv_fill_graph_check_sheet(ws_graph, summaries, contexts)
     ws_skipped = wb.create_sheet('Tệp bỏ qua')
     _stv_fill_skipped_sheet(ws_skipped, skipped)
-    if sections:
-        _fr_precompute_section_fit_quality(summaries, contexts, sections, section_match_tolerance_m=section_match_tolerance_m, section_measurement_mode=section_measurement_mode)
     ws_strict = wb.create_sheet('Strict Validation')
     _fr_fill_strict_validation_sheet(ws_strict, summaries, contexts, expected_route_km=expected_route_km, length_tolerance_km=0.300, graph_reach_tolerance_km=graph_reach_tolerance_km, event_shortfall_tolerance_km=event_shortfall_tolerance_km, duration_threshold_s=duration_threshold_s, skipped=skipped)
     _fr_remove_excluded_output_sheets(wb)

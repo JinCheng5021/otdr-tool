@@ -7,7 +7,7 @@ from typing import Optional
 import unittest
 from unittest.mock import patch
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
 from . import msor_converter as converter
 
@@ -106,6 +106,68 @@ class CacheSafetyTests(unittest.TestCase):
         self.assertTrue(
             converter.EXCLUDED_OUTPUT_SHEETS.isdisjoint(workbook.sheetnames)
         )
+
+
+class StvSectionsWorkbookTests(unittest.TestCase):
+    def test_stv_output_reuses_fastreporter_sections_sheet(self) -> None:
+        summary = converter.FileSummary(
+            file_name='fixture.sor',
+            fiber='Fiber 1',
+            wavelength_display='1550 nm',
+            total_loss_db=0.2,
+            length_km=1.0,
+            attenuation_dbkm=0.2,
+            splice_points=[],
+            end_distance_km=1.0,
+            graph_end_km=1.0,
+            graph_curve_max_km=1.0,
+            source_format='SOR',
+            parsed_total_loss_db=0.2,
+            route_corrected_total_loss_db=None,
+            loss_source_used='fixture',
+        )
+        contexts = {
+            'fixture.sor': {
+                'events': [],
+                'metadata': {'fiber_id': 'Fiber 1'},
+            }
+        }
+
+        output = converter._stv_build_workbook(
+            [summary],
+            contexts,
+            [],
+            deviation_m=5.0,
+            threshold_db=0.5,
+            expected_route_km=None,
+            jumper_excluded_m=0.0,
+            graph_reach_tolerance_km=0.3,
+            event_shortfall_tolerance_km=0.3,
+            skipped=[],
+            sections=[{'start_km': 0.0, 'end_km': 1.0, 'length_km': 1.0}],
+            section_match_tolerance_m=100.0,
+            section_measurement_mode='fit',
+        )
+
+        workbook = load_workbook(output, data_only=False)
+        self.assertEqual(
+            workbook.sheetnames,
+            [
+                'Bảng sự kiện',
+                'Sections',
+                'Kiểm tra đồ thị',
+                'Tệp bỏ qua',
+                'Strict Validation',
+            ],
+        )
+        sheet = workbook['Sections']
+        self.assertEqual(sheet['C1'].value, 'Section 1')
+        self.assertEqual(sheet['C2'].value, 1)
+        self.assertEqual(sheet['D2'].value, 'ID S+E 1.000')
+        self.assertEqual(sheet['C4'].value, 0.2)
+        self.assertEqual(sheet['D4'].value, 0.2)
+        self.assertEqual(sheet.freeze_panes, 'C4')
+        self.assertEqual(contexts['fixture.sor']['section_pairs'], [(0.2, 0.2)])
 
 
 class TotalLossSelectionTests(unittest.TestCase):
