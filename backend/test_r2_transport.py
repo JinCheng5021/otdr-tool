@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import inspect
 import os
@@ -12,7 +13,7 @@ os.environ.setdefault("VERCEL", "1")
 os.environ.setdefault("R2_SECRET_ACCESS_KEY", "test-r2-session-secret")
 
 from . import app_trace
-from .blob_storage import StoredBlob
+from .r2_storage import StoredBlob
 
 
 UPLOAD_ID = "123e4567-e89b-12d3-a456-426614174000"
@@ -49,12 +50,6 @@ CONVERT_OPTIONS = {
     "section_allow_split": "true",
     "section_match_tolerance_m": 88.0,
     "section_measurement_mode": "fit",
-    "orl_pass_threshold_db": 27.0,
-    "orl_source_mode": "auto",
-    "orl_missing_policy": "reference",
-    "orl_allow_lower_bound": "true",
-    "orl_lower_bound_status": "Unknown",
-    "orl_physical_mode": "disabled",
     "output_mode": "fastreporter",
     "exporter_name": "Tester",
     "unit": "QA",
@@ -63,7 +58,6 @@ CONVERT_OPTIONS = {
     "stv_used_core": "12",
 }
 
-#ABCD
 class FakeBlobStorage:
     instances: list["FakeBlobStorage"] = []
 
@@ -507,6 +501,35 @@ class R2SigningEndpointTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ConvertContractTests(unittest.TestCase):
+    def test_normal_scope_discards_stale_range_values(self) -> None:
+        options = {
+            **CONVERT_OPTIONS,
+            "section_export_scope": "all",
+            "segment_start_km": "9.8",
+            "segment_end_km": "1.2",
+        }
+        build_options = {
+            key: value
+            for key, value in options.items()
+            if key not in {"exporter_name", "unit", "route_name"}
+        }
+
+        with patch.object(
+            app_trace,
+            "build_workbook_from_uploads",
+            return_value=io.BytesIO(b"XLSX-DATA"),
+        ) as workbook_mock:
+            response = app_trace._build_export_response(
+                [("trace.sor", INPUT_BYTES)],
+                **build_options,
+            )
+
+        self.assertEqual(response.body, b"XLSX-DATA")
+        workbook_options = workbook_mock.call_args.kwargs
+        self.assertEqual(workbook_options["section_export_scope"], "all")
+        self.assertIsNone(workbook_options["segment_start_km"])
+        self.assertIsNone(workbook_options["segment_end_km"])
+
     def test_blob_endpoint_has_the_same_business_parameter_contract(self) -> None:
         original = inspect.signature(app_trace.convert).parameters
         from_blob = inspect.signature(app_trace.convert_from_blob).parameters
@@ -525,6 +548,23 @@ class ConvertContractTests(unittest.TestCase):
                     from_blob[name].default.default,
                     original[name].default.default,
                 )
+
+    def test_orl_threshold_parameters_are_removed_from_all_export_contracts(self) -> None:
+        removed = {
+            "orl_pass_threshold_db",
+            "orl_source_mode",
+            "orl_missing_policy",
+            "orl_allow_lower_bound",
+            "orl_lower_bound_status",
+            "orl_physical_mode",
+        }
+        contracts = (
+            inspect.signature(app_trace.convert).parameters,
+            inspect.signature(app_trace.convert_from_blob).parameters,
+            inspect.signature(app_trace.build_workbook_from_uploads).parameters,
+        )
+        for contract in contracts:
+            self.assertTrue(removed.isdisjoint(contract))
 
 
 if __name__ == "__main__":

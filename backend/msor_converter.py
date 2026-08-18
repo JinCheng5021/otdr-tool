@@ -153,6 +153,7 @@ def _fr_log(logs: list[dict], stage: str, level: str, message: str) -> None:
 
 
 def _fr_init_context(summary, selected_rows, parse_mode, sor_meta, trc_trace, orl_db, metadata):
+    orl_value = _fr_round_orl(orl_db)
     return {
         'summary': summary,
         'events': selected_rows or [],
@@ -160,14 +161,9 @@ def _fr_init_context(summary, selected_rows, parse_mode, sor_meta, trc_trace, or
         'sor_meta': sor_meta,
         'trc_trace': trc_trace,
         'orl_db': orl_db,
-        'orl_display': None,
+        'orl_display': _fr_format_span_orl_display(orl_value, lower_bound=False),
         'orl_status': 'Unknown',
-        'orl_analysis': None,
-        'orl_value_db': None,
-        'orl_source_kind': '',
-        'orl_source_detail': '',
-        'orl_use_for_judgment': False,
-        'orl_reason': '',
+        'orl_value_db': orl_value,
         'metadata': metadata or {},
         'parser_family': getattr(summary, 'parse_family', ''),
         'parser_family_confidence': getattr(summary, 'parse_family_confidence', ''),
@@ -477,29 +473,6 @@ class SectionFitResult:
     fit_window_end_km: Optional[float] = None
     r2_rms_scope: str = ''
     estimate_level: str = ''
-
-
-@dataclass
-class ORLAnalysis:
-    file_name: str
-    display: Optional[str]
-    value_db: Optional[float]
-    status: str
-    advanced_status: str
-    source_kind: str
-    source_detail: str
-    source_confidence: str
-    pass_threshold_db: float
-    use_for_judgment: bool
-    lower_bound: bool
-    reason: str
-    recommendation: str
-    physical_mode: str
-    physical_attempted: bool
-    physical_value_db: Optional[float]
-    physical_status: str
-    physical_reason: str
-    strongest_reflectance_db: Optional[float]
 
 
 @dataclass
@@ -5012,15 +4985,6 @@ def _fr_round_orl(value: Optional[float]) -> Optional[float]:
     return round(float(value), 3)
 
 
-def _fr_status_for_measured_orl(value: Optional[float], threshold_db: float) -> str:
-    if not _fr_is_sane_orl_value(value):
-        return 'Unknown'
-    try:
-        return 'Pass' if float(value) >= float(threshold_db) else 'Fail'
-    except Exception:
-        return 'Unknown'
-
-
 def _fr_extract_measured_orl_candidate(
     file_name: str,
     raw: bytes,
@@ -5104,189 +5068,6 @@ def _fr_extract_measured_orl_candidate(
     return None
 
 
-def _fr_physical_orl_trace_diagnostic(ctx: Optional[dict], summary: FileSummary, physical_mode: str) -> dict:
-    mode = str(physical_mode or 'disabled').strip().lower()
-    rows = (ctx or {}).get('events') or []
-    reflectances = []
-    for ev in rows:
-        val = _fr_reportable_reflectance_db(getattr(ev, 'reflectance_db', None))
-        if isinstance(val, (int, float)) and math.isfinite(float(val)):
-            reflectances.append(float(val))
-    strongest = max(reflectances) if reflectances else None  # closest to 0 dB = strongest reflection
-
-    if mode in {'', 'disabled', 'off', 'none', 'false'}:
-        return {
-            'mode': 'disabled',
-            'attempted': False,
-            'value_db': None,
-            'status': 'Not attempted',
-            'reason': 'Tắt ORL vật lý từ trace. Phase 6 chỉ dùng ORL đo được/lower-bound an toàn.',
-            'strongest_reflectance_db': round(strongest, 3) if strongest is not None else None,
-        }
-
-    trace = (ctx or {}).get('raw_trace_series') or {}
-    if not trace:
-        return {
-            'mode': mode,
-            'attempted': True,
-            'value_db': None,
-            'status': 'Not available',
-            'reason': 'Không có raw trace samples để thử đánh giá ORL vật lý.',
-            'strongest_reflectance_db': round(strongest, 3) if strongest is not None else None,
-        }
-
-    # Important: do not fake physics. The phase-5 trace may be relative-scaled for
-    # section attenuation, but physical ORL needs absolute backscatter/reference
-    # calibration. Without those fields, a numeric result would be misleading.
-    required_missing = []
-    meta = (ctx or {}).get('metadata') or {}
-    for key in ('backscatter_coefficient_db', 'launch_power_dbm', 'receiver_calibration_db', 'orl_calibration_db'):
-        if key not in meta or meta.get(key) in (None, ''):
-            required_missing.append(key)
-    return {
-        'mode': mode,
-        'attempted': True,
-        'value_db': None,
-        'status': 'Need calibration',
-        'reason': 'Chưa tính ORL vật lý từ trace vì thiếu hiệu chuẩn tuyệt đối: ' + ', '.join(required_missing) + '. Raw trace hiện chỉ đủ tin hơn cho section-fit/shape diagnostics, không đủ để biến thành span ORL vật lý.',
-        'strongest_reflectance_db': round(strongest, 3) if strongest is not None else None,
-    }
-
-
-def _fr_analyze_orl(
-    file_name: str,
-    raw: bytes,
-    metadata: Optional[dict],
-    summary: FileSummary,
-    ctx: Optional[dict],
-    *,
-    preparsed_sor_meta=_NO_PREPARSED_SOR_META,
-    orl_pass_threshold_db: float = 28.0,
-    orl_source_mode: str = 'auto',
-    orl_allow_lower_bound: bool = True,
-    orl_lower_bound_status: str = 'Unknown',
-    orl_physical_mode: str = 'disabled',
-) -> ORLAnalysis:
-    source_mode = str(orl_source_mode or 'auto').strip().lower()
-    threshold = float(orl_pass_threshold_db or 28.0)
-    lower_status = str(orl_lower_bound_status or 'Unknown').strip() or 'Unknown'
-    lower_value = None
-    if metadata:
-        lower_value = _fr_round_orl(metadata.get('reflection_threshold_db'))
-    measured = _fr_extract_measured_orl_candidate(
-        file_name,
-        raw,
-        preparsed_sor_meta=preparsed_sor_meta,
-    )
-    has_measured = measured is not None and _fr_is_sane_orl_value(measured.get('value_db'))
-    # Conditional phase-6 behavior: physical ORL trace diagnostics are only useful
-    # when the file is missing a measured/exact ORL.  If measured ORL exists, do
-    # not run/advertise trace-based ORL diagnostics so the report stays decisive.
-    requested_physical_mode = str(orl_physical_mode or 'disabled').strip().lower()
-    effective_physical_mode = 'disabled' if has_measured and requested_physical_mode not in {'', 'disabled', 'off', 'none', 'false'} else requested_physical_mode
-    physical = _fr_physical_orl_trace_diagnostic(ctx, summary, effective_physical_mode)
-
-    def measured_analysis(cand: dict) -> ORLAnalysis:
-        value = _fr_round_orl(cand.get('value_db'))
-        status = _fr_status_for_measured_orl(value, threshold)
-        advanced = 'PASS' if status == 'Pass' else ('FAIL' if status == 'Fail' else 'UNKNOWN')
-        rec = 'Có thể dùng ORL này để đánh giá Pass/Fail.' if status in {'Pass', 'Fail'} else 'Không đủ điều kiện đánh giá ORL.'
-        return ORLAnalysis(
-            file_name=file_name,
-            display=_fr_format_span_orl_display(value, lower_bound=False),
-            value_db=value,
-            status=status,
-            advanced_status=advanced,
-            source_kind=str(cand.get('source_kind') or 'measured_orl'),
-            source_detail=str(cand.get('source_detail') or 'Measured ORL'),
-            source_confidence=str(cand.get('source_confidence') or 'Medium'),
-            pass_threshold_db=threshold,
-            use_for_judgment=status in {'Pass', 'Fail'},
-            lower_bound=False,
-            reason=str(cand.get('reason') or 'ORL đo được từ file.'),
-            recommendation=rec,
-            physical_mode=str(physical.get('mode') or orl_physical_mode),
-            physical_attempted=bool(physical.get('attempted')),
-            physical_value_db=_fr_round_orl(physical.get('value_db')),
-            physical_status=str(physical.get('status') or ''),
-            physical_reason=str(physical.get('reason') or ''),
-            strongest_reflectance_db=physical.get('strongest_reflectance_db'),
-        )
-
-    def lower_analysis() -> ORLAnalysis:
-        display = _fr_format_span_orl_display(lower_value, lower_bound=True)
-        # Status field remains compatible with old Link Results.  The advanced
-        # status and Use-for-Judgment are the authoritative phase-6 fields.
-        legacy_status = lower_status if lower_status in {'Pass', 'Fail', 'Unknown'} else 'Unknown'
-        return ORLAnalysis(
-            file_name=file_name,
-            display=display,
-            value_db=lower_value,
-            status=legacy_status,
-            advanced_status='LOWER_BOUND_ONLY',
-            source_kind='metadata_lower_bound',
-            source_detail='FxdParams reflection/ORL-like threshold metadata',
-            source_confidence='Low',
-            pass_threshold_db=threshold,
-            use_for_judgment=False,
-            lower_bound=True,
-            reason='Chỉ có giá trị tham khảo/threshold dạng lower-bound từ metadata, không phải span ORL đo được thật.',
-            recommendation='Không dùng giá trị này để kết luận Pass/Fail ORL; chỉ hiển thị để tham khảo hoặc truy vết file.',
-            physical_mode=str(physical.get('mode') or orl_physical_mode),
-            physical_attempted=bool(physical.get('attempted')),
-            physical_value_db=_fr_round_orl(physical.get('value_db')),
-            physical_status=str(physical.get('status') or ''),
-            physical_reason=str(physical.get('reason') or ''),
-            strongest_reflectance_db=physical.get('strongest_reflectance_db'),
-        )
-
-    def none_analysis(reason: str) -> ORLAnalysis:
-        return ORLAnalysis(
-            file_name=file_name,
-            display=None,
-            value_db=None,
-            status='Unknown',
-            advanced_status='NOT_AVAILABLE',
-            source_kind='not_available',
-            source_detail='',
-            source_confidence='None',
-            pass_threshold_db=threshold,
-            use_for_judgment=False,
-            lower_bound=False,
-            reason=reason,
-            recommendation='Không đánh giá ORL trong báo cáo; cần mở tool gốc/đo lại nếu ORL là tiêu chí bắt buộc.',
-            physical_mode=str(physical.get('mode') or orl_physical_mode),
-            physical_attempted=bool(physical.get('attempted')),
-            physical_value_db=_fr_round_orl(physical.get('value_db')),
-            physical_status=str(physical.get('status') or ''),
-            physical_reason=str(physical.get('reason') or ''),
-            strongest_reflectance_db=physical.get('strongest_reflectance_db'),
-        )
-
-    has_lower = bool(orl_allow_lower_bound) and _fr_is_sane_orl_value(lower_value)
-
-    if source_mode == 'exact_only':
-        if has_measured:
-            return measured_analysis(measured)
-        return none_analysis('Đang chọn Chỉ lấy ORL đo được, nhưng file không có exact/measured ORL hợp lệ.')
-    if source_mode == 'metadata_only':
-        if has_lower:
-            return lower_analysis()
-        return none_analysis('Đang chọn Chỉ lấy giá trị tham khảo nhưng file không có lower-bound/threshold ORL hợp lệ hoặc đang tắt hiển thị lower-bound.')
-    if source_mode == 'prefer_metadata':
-        if has_lower:
-            return lower_analysis()
-        if has_measured:
-            return measured_analysis(measured)
-        return none_analysis('Không tìm thấy ORL đo được hoặc giá trị tham khảo hợp lệ.')
-
-    # auto/default: exact ORL first; lower-bound only as display fallback.
-    if has_measured:
-        return measured_analysis(measured)
-    if has_lower:
-        return lower_analysis()
-    return none_analysis('Không tìm thấy ORL đo được; cũng không có lower-bound/threshold hợp lệ để hiển thị tham khảo.')
-
 def _fr_build_context(
     files: Iterable[tuple[str, bytes]],
     threshold_db: float = 0.5,
@@ -5298,11 +5079,6 @@ def _fr_build_context(
     overlength_tolerance_km: Optional[float] = None,
     segment_start_km: Optional[float] = None,
     segment_end_km: Optional[float] = None,
-    orl_pass_threshold_db: float = 28.0,
-    orl_source_mode: str = 'auto',
-    orl_allow_lower_bound: bool = True,
-    orl_lower_bound_status: str = 'Unknown',
-    orl_physical_mode: str = 'disabled',
     logs: Optional[list[dict]] = None,
     preview_fast: bool = False,
     max_seconds: Optional[float] = None,
@@ -5343,28 +5119,6 @@ def _fr_build_context(
                 _fr_log(logs, 'trace', 'INFO', f"{file_name} | Raw trace source: {rt.get('source')} | points={rt.get('raw_points_total')} | calibrated={rt.get('calibrated_db')}")
             else:
                 _fr_log(logs, 'trace', 'WARN', f'{file_name} | Chưa lấy được raw trace để fit section; sẽ dùng fallback event/slope khi cần.')
-            orl_analysis = _fr_analyze_orl(
-                file_name,
-                raw,
-                metadata,
-                summary,
-                ctx,
-                preparsed_sor_meta=bundle.get('sor_meta'),
-                orl_pass_threshold_db=orl_pass_threshold_db,
-                orl_source_mode=orl_source_mode,
-                orl_allow_lower_bound=orl_allow_lower_bound,
-                orl_lower_bound_status=orl_lower_bound_status,
-                orl_physical_mode=orl_physical_mode,
-            )
-            ctx['orl_analysis'] = orl_analysis
-            ctx['orl_display'] = orl_analysis.display
-            ctx['orl_status'] = orl_analysis.status
-            ctx['orl_value_db'] = orl_analysis.value_db
-            ctx['orl_source_kind'] = orl_analysis.source_kind
-            ctx['orl_source_detail'] = orl_analysis.source_detail
-            ctx['orl_use_for_judgment'] = orl_analysis.use_for_judgment
-            ctx['orl_reason'] = orl_analysis.reason
-            _fr_log(logs, 'orl', 'INFO' if orl_analysis.use_for_judgment else 'WARN', f"{file_name} | ORL={orl_analysis.display or '-'} | status={orl_analysis.advanced_status} | source={orl_analysis.source_detail or '-'} | use_for_judgment={orl_analysis.use_for_judgment} | {orl_analysis.reason}")
             ctx['graph_assessment'] = _assess_graph_length(
                 summary,
                 expected_route_km=expected_route_km,
@@ -5375,7 +5129,7 @@ def _fr_build_context(
                 overlength_tolerance_km=overlength_tolerance_km,
             )
             if preview_fast:
-                # Trace Viewer chỉ cần trace/events/metadata/ORL tóm tắt.
+                # Trace Viewer chỉ cần trace/events/metadata tóm tắt.
                 # Bỏ qua segment deep-scan để dựng đồ thị nhanh; Excel export vẫn chạy đầy đủ.
                 ctx['segment_assessment'] = None
                 ctx['segment_event_rows'] = []
@@ -7014,9 +6768,6 @@ def _build_core_metrics(summary: FileSummary, ctx: dict, threshold_db: float = 0
         'attenuation_dbkm': summary.attenuation_dbkm,
         'orl_display': ctx.get('orl_display'),
         'orl_status': ctx.get('orl_status', 'Unknown'),
-        'orl_advanced_status': getattr(ctx.get('orl_analysis'), 'advanced_status', ''),
-        'orl_source_detail': getattr(ctx.get('orl_analysis'), 'source_detail', ctx.get('orl_source_detail', '')),
-        'orl_use_for_judgment': getattr(ctx.get('orl_analysis'), 'use_for_judgment', ctx.get('orl_use_for_judgment', False)),
         'loss_source_used': getattr(summary, 'loss_source_used', ''),
         'parse_family': getattr(summary, 'parse_family', ''),
         'parse_family_reason': getattr(summary, 'parse_family_reason', ''),
@@ -7036,8 +6787,7 @@ def _build_core_metrics(summary: FileSummary, ctx: dict, threshold_db: float = 0
 def _fr_fill_core_metrics_sheet(ws, summaries: list[FileSummary], contexts: dict[str, dict], threshold_db: float = 0.5, section_pairs_by_file: Optional[dict[str, list[tuple[Optional[float], Optional[float]]]]] = None, duration_threshold_s: Optional[float] = None) -> None:
     _fr_write_header_row(ws, [
         'Tệp', 'Định dạng', 'Sợi', 'Bước sóng (nm)', 'Chiều dài (km)', 'Suy hao tổng (dB)',
-        'Suy hao TB (dB/km)', 'ORL hiển thị', 'Trạng thái ORL', 'ORL advanced status',
-        'Nguồn ORL', 'ORL dùng để kết luận?', 'Nguồn suy hao tổng',
+        'Suy hao TB (dB/km)', 'ORL đo được', 'Trạng thái ORL', 'Nguồn suy hao tổng',
         'Family parser', 'Số event', 'Max event loss', 'Max event đỏ', 'Avg splice loss',
         'Max section loss', 'Avg section loss', 'Duration (s)', 'Duration threshold (s)', 'Duration status', 'Duration note'
     ])
@@ -7049,7 +6799,6 @@ def _fr_fill_core_metrics_sheet(ws, summaries: list[FileSummary], contexts: dict
         values = [
             core['display_file_name'], core['source_format'], core['fiber_label'], core['wavelength_nm'],
             core['length_km'], core['total_loss_db'], core['attenuation_dbkm'], core['orl_display'], core['orl_status'],
-            core['orl_advanced_status'], core['orl_source_detail'], 'Yes' if core['orl_use_for_judgment'] else 'No',
             core['loss_source_used'], _to_vi_parser_family(core['parse_family']), core['event_count'], core['max_event_loss_db'],
             core['max_red_event_loss_db'], core['avg_splice_loss_db'], core['max_section_loss_db'], core['avg_section_loss_db'],
             core['duration_s'], core['duration_threshold_s'], core['duration_status'], core['duration_note']
@@ -7057,8 +6806,8 @@ def _fr_fill_core_metrics_sheet(ws, summaries: list[FileSummary], contexts: dict
         for c, value in enumerate(values, start=1):
             ws.cell(row, c, value)
         if core.get('duration_status') == 'Fail':
-            ws.cell(row, 23).fill = RED_FILL
-            ws.cell(row, 24).fill = RED_FILL
+            ws.cell(row, 20).fill = RED_FILL
+            ws.cell(row, 21).fill = RED_FILL
         row += 1
     _fr_selective_autofit(ws, max_scan_rows=max(row, 20), max_width=70)
 
@@ -7451,7 +7200,7 @@ def _fr_write_header_row(ws, headers: list[str]) -> None:
     ws.freeze_panes = 'A2'
 
 
-def _fr_fill_app_parameters_sheet(ws, *, threshold_db: float, deviation_m: float, expected_route_km: Optional[float], jumper_excluded_m: float, length_tolerance_km: float, graph_reach_tolerance_km: Optional[float], event_shortfall_tolerance_km: Optional[float], overlength_tolerance_km: Optional[float], segment_start_km: Optional[float], segment_end_km: Optional[float], section_export_scope: str, section_merge_tolerance_m: Optional[float], section_min_length_km: float, section_event_source: str, section_boundary_priority: str, section_allow_split: bool, section_match_tolerance_m: float, section_measurement_mode: str, orl_pass_threshold_db: float, orl_source_mode: str, orl_allow_lower_bound: bool, orl_lower_bound_status: str, orl_physical_mode: str = 'disabled', section_threshold_db: Optional[float] = None, duration_threshold_s: Optional[float] = None) -> None:
+def _fr_fill_app_parameters_sheet(ws, *, threshold_db: float, deviation_m: float, expected_route_km: Optional[float], jumper_excluded_m: float, length_tolerance_km: float, graph_reach_tolerance_km: Optional[float], event_shortfall_tolerance_km: Optional[float], overlength_tolerance_km: Optional[float], segment_start_km: Optional[float], segment_end_km: Optional[float], section_export_scope: str, section_merge_tolerance_m: Optional[float], section_min_length_km: float, section_event_source: str, section_boundary_priority: str, section_allow_split: bool, section_match_tolerance_m: float, section_measurement_mode: str, section_threshold_db: Optional[float] = None, duration_threshold_s: Optional[float] = None) -> None:
     _fr_write_header_row(ws, ['Tham số', 'Giá trị đang dùng', 'Giải thích'])
     rows = [
         ('threshold_db', threshold_db, 'Ngưỡng event dùng cho tô đỏ / lọc event mạnh.'),
@@ -7473,11 +7222,6 @@ def _fr_fill_app_parameters_sheet(ws, *, threshold_db: float, deviation_m: float
         ('section_allow_split', section_allow_split, 'Cho phép giữ section ngắn hay gộp lại.'),
         ('section_match_tolerance_m', section_match_tolerance_m, 'Sai số map section chung sang từng fiber.'),
         ('section_measurement_mode', section_measurement_mode, 'Cách tính loss section: fit = raw-trace fit + fallback event/slope; event = logic event/slope cũ; 2point = nội suy đầu-cuối.'),
-        ('orl_pass_threshold_db', orl_pass_threshold_db, 'Ngưỡng Pass/Fail cho exact ORL.'),
-        ('orl_source_mode', orl_source_mode, 'Nguồn lấy ORL: exact / metadata / auto.'),
-        ('orl_allow_lower_bound', orl_allow_lower_bound, 'Có cho phép hiện ORL kiểu <xx.xx hay không.'),
-        ('orl_lower_bound_status', orl_lower_bound_status, 'Status legacy gán cho ORL fallback kiểu <xx.xx; Phase 6 vẫn đánh Use For Judgment = No với lower-bound.'),
-        ('orl_physical_mode', orl_physical_mode, 'ORL vật lý từ trace: disabled/diagnostic/experimental. Mặc định tắt; nếu bật mà thiếu hiệu chuẩn tuyệt đối thì app chỉ ghi lý do, không tự tạo số ORL.'),
     ]
     for r_idx, (name, value, desc) in enumerate(rows, start=2):
         ws.cell(r_idx, 1, name)
@@ -8220,92 +7964,6 @@ def _fr_fill_section_fit_quality_sheet(ws, summaries: list[FileSummary], context
 
 
 
-def _fr_fill_orl_analysis_sheet(ws, summaries: list[FileSummary], contexts: dict[str, dict]) -> None:
-    headers = [
-        'Tệp', 'Fiber', 'Wavelength', 'ORL hiển thị', 'ORL value (dB)',
-        'Legacy status', 'Advanced status', 'Nguồn ORL', 'Chi tiết nguồn', 'Độ tin cậy nguồn',
-        'Ngưỡng đạt (dB)', 'Use for judgment', 'Lower-bound?', 'Lý do', 'Khuyến nghị',
-        'Physical mode', 'Physical attempted', 'Physical ORL (dB)', 'Physical status',
-        'Strongest reflectance event (dB)', 'Physical reason'
-    ]
-    _fr_write_header_row(ws, headers)
-    row = 2
-    for summary in summaries:
-        ctx = contexts.get(summary.file_name, {})
-        analysis = ctx.get('orl_analysis')
-        if not isinstance(analysis, ORLAnalysis):
-            analysis = ORLAnalysis(
-                file_name=summary.file_name,
-                display=ctx.get('orl_display'),
-                value_db=ctx.get('orl_value_db'),
-                status=ctx.get('orl_status', 'Unknown'),
-                advanced_status='UNKNOWN',
-                source_kind=ctx.get('orl_source_kind', ''),
-                source_detail=ctx.get('orl_source_detail', ''),
-                source_confidence='',
-                pass_threshold_db=28.0,
-                use_for_judgment=bool(ctx.get('orl_use_for_judgment')),
-                lower_bound=False,
-                reason=ctx.get('orl_reason', ''),
-                recommendation='',
-                physical_mode='disabled',
-                physical_attempted=False,
-                physical_value_db=None,
-                physical_status='',
-                physical_reason='',
-                strongest_reflectance_db=None,
-            )
-        meta = ctx.get('metadata', {})
-        m = re.search(r'(\d{3,4})', summary.wavelength_display or '')
-        values = [
-            summary.file_name,
-            _display_fiber_label(summary, meta),
-            int(m.group(1)) if m else None,
-            analysis.display,
-            analysis.value_db,
-            analysis.status,
-            analysis.advanced_status,
-            analysis.source_kind,
-            analysis.source_detail,
-            analysis.source_confidence,
-            analysis.pass_threshold_db,
-            'Yes' if analysis.use_for_judgment else 'No',
-            'Yes' if analysis.lower_bound else 'No',
-            analysis.reason,
-            analysis.recommendation,
-            analysis.physical_mode,
-            'Yes' if analysis.physical_attempted else 'No',
-            analysis.physical_value_db,
-            analysis.physical_status,
-            analysis.strongest_reflectance_db,
-            analysis.physical_reason,
-        ]
-        for c, value in enumerate(values, start=1):
-            ws.cell(row, c, value)
-        if analysis.advanced_status == 'PASS':
-            fill = GREEN_FILL
-        elif analysis.advanced_status == 'FAIL':
-            fill = RED_FILL
-        elif analysis.advanced_status in {'LOWER_BOUND_ONLY', 'NOT_AVAILABLE', 'UNKNOWN'}:
-            fill = LOG_WARN_FILL
-        else:
-            fill = LOG_INFO_FILL
-        for c in range(1, len(headers) + 1):
-            ws.cell(row, c).fill = fill
-        for c in (5, 11, 18, 20):
-            if isinstance(ws.cell(row, c).value, (int, float)):
-                ws.cell(row, c).number_format = '0.000'
-        row += 1
-    widths = {
-        'A': 34, 'B': 18, 'C': 12, 'D': 14, 'E': 14, 'F': 14, 'G': 18,
-        'H': 22, 'I': 42, 'J': 16, 'K': 14, 'L': 18, 'M': 14,
-        'N': 72, 'O': 72, 'P': 18, 'Q': 18, 'R': 16, 'S': 18, 'T': 24, 'U': 90,
-    }
-    for col, width in widths.items():
-        ws.column_dimensions[col].width = width
-    _fr_selective_autofit(ws, max_scan_rows=max(row, 20), max_width=90)
-
-
 def _fr_yes_no(value) -> str:
     return 'Có' if bool(value) else 'Không'
 
@@ -8463,9 +8121,6 @@ def _fr_parser_warning_text(summary: FileSummary, ctx: dict, diag: dict, profile
             warnings.append(f'Attenuation ngoài dải kiểm tra thông thường: {att:.3f} dB/km.')
     except Exception:
         pass
-    orl = (ctx or {}).get('orl_analysis')
-    if orl is not None and not getattr(orl, 'use_for_judgment', False):
-        warnings.append('ORL không phải measured ORL dùng để kết luận.')
     if not warnings:
         return 'OK'
     return ' | '.join(dict.fromkeys(warnings))
@@ -8486,7 +8141,6 @@ def _fr_fill_parser_diagnostics_sheet(ws, summaries: list[FileSummary], contexts
         'Trace source', 'Trace points', 'First km', 'Last km', 'Reference span km',
         'Raw last trước scale', 'Raw last sau scale', 'Distance scale status', 'Distance scale OK?',
         'Can draw graph?', 'Can use for fit?', 'Can calculate R²/RMS?', 'Trace quality',
-        'ORL display', 'ORL source', 'ORL dùng kết luận?', 'ORL status', 'ORL reason',
         'Route status', 'Route reason', 'Parser reason', 'Warnings'
     ]
     _fr_write_header_row(ws, headers)
@@ -8507,7 +8161,6 @@ def _fr_fill_parser_diagnostics_sheet(ws, summaries: list[FileSummary], contexts
         final_status, level, use_for_judgment, recommendation = _fr_parser_final_status(summary, ctx, diag, profile, event_metrics)
         warnings = _fr_parser_warning_text(summary, ctx, diag, profile, event_metrics)
         ga = ctx.get('graph_assessment')
-        orl = ctx.get('orl_analysis')
         values = [
             summary.file_name,
             _display_fiber_label(summary, meta),
@@ -8563,11 +8216,6 @@ def _fr_fill_parser_diagnostics_sheet(ws, summaries: list[FileSummary], contexts
             profile.get('can_use_for_fit'),
             profile.get('can_calculate_r2_rms'),
             profile.get('trace_quality_level'),
-            getattr(orl, 'display', ctx.get('orl_display') or ''),
-            getattr(orl, 'source_detail', ctx.get('orl_source_detail') or ''),
-            _fr_yes_no(getattr(orl, 'use_for_judgment', ctx.get('orl_use_for_judgment') or False)),
-            getattr(orl, 'advanced_status', ctx.get('orl_status') or ''),
-            getattr(orl, 'reason', ctx.get('orl_reason') or ''),
             getattr(ga, 'verdict', ''),
             getattr(ga, 'reason', ''),
             getattr(summary, 'parse_family_reason', '') or ctx.get('parser_family_reason') or '',
@@ -8754,8 +8402,6 @@ def _fr_vendor_support_row(summary: FileSummary, ctx: dict) -> dict:
     can_fit = _fr_is_yes_text(profile.get('can_use_for_fit'))
     can_r2 = _fr_is_yes_text(profile.get('can_calculate_r2_rms'))
     trace_scale_ok = bool(diag.get('distance_scale_ok'))
-    orl = ctx.get('orl_analysis')
-    orl_use = bool(getattr(orl, 'use_for_judgment', ctx.get('orl_use_for_judgment') or False))
 
     if final_status == 'PASS_READ_FULL':
         support_level = 'SUPPORTED_FULL'
@@ -8790,8 +8436,6 @@ def _fr_vendor_support_row(summary: FileSummary, ctx: dict) -> dict:
         limitations.append('Trace chỉ dùng xem/fit có điều kiện; chưa đủ fit sâu.')
     if diag.get('candidate_found') and not trace_scale_ok:
         limitations.append('Distance scale chưa đạt rule tin cậy.')
-    if not orl_use:
-        limitations.append('ORL không phải measured ORL dùng kết luận.')
     if vendor in {'Yokogawa', 'Anritsu'}:
         limitations.append('Vendor chưa có đủ golden test trong app.')
     if not limitations:
@@ -8817,7 +8461,7 @@ def _fr_vendor_support_row(summary: FileSummary, ctx: dict) -> dict:
         'raw_fit_support': 'OK' if can_fit else ('CONDITIONAL/NO' if can_draw else 'NO'),
         'r2_rms_support': 'OK' if can_r2 else 'NO',
         'distance_scale_status': diag.get('distance_scale_status') or diag.get('raw_status') or '',
-        'orl_support': 'MEASURED_OK' if orl_use else 'REFERENCE/UNKNOWN',
+        'orl_support': 'RAW_VALUE_ONLY' if _fr_is_sane_orl_value(ctx.get('orl_db')) else 'NOT_AVAILABLE',
         'production_usage': recommendation,
         'known_limits': ' | '.join(dict.fromkeys(limitations)),
         'required_action': 'Cho phép dùng theo cột Dùng để kết luận; nếu WARN/FAIL phải xem Parser Diagnostics trước khi chốt báo cáo.',
@@ -9568,7 +9212,6 @@ def _fr_strict_validation_rows_for_file(
     event_metrics = _fr_event_health_metrics(summary, ctx)
     final_status, parser_level, use_for_judgment, recommendation = _fr_parser_final_status(summary, ctx, diag, profile, event_metrics)
     ga = ctx.get('graph_assessment')
-    orl = ctx.get('orl_analysis')
 
     def add(category, code, name, level, measured='', expected='', impact='', action='', evidence=''):
         rows.append(_fr_make_validation_row(summary, ctx, category, code, name, level, measured, expected, impact, action, evidence))
@@ -9719,17 +9362,6 @@ def _fr_strict_validation_rows_for_file(
         add('Trace', 'SV-TRACE-003', 'Fit/R² readiness', 'WARN', f'fit={profile.get("can_use_for_fit")}; r2={profile.get("can_calculate_r2_rms")}', 'Fit/R² đầy đủ là tốt nhất', 'Graph có thể xem nhưng fit sâu hạn chế.', 'Kết luận section dựa trên Section Fit Quality và fallback note.')
     else:
         add('Trace', 'SV-TRACE-003', 'Fit/R² readiness', 'INFO', 'Không có trace fit', 'Fit/R² không bắt buộc nếu chỉ xuất event', 'Không có fit sâu.', 'Không dùng R²/RMS để kết luận.')
-
-    # ORL judgement readiness
-    orl_use = bool(getattr(orl, 'use_for_judgment', ctx.get('orl_use_for_judgment') or False)) if orl is not None else False
-    orl_display = getattr(orl, 'display', ctx.get('orl_display') or '') if orl is not None else (ctx.get('orl_display') or '')
-    orl_status = getattr(orl, 'advanced_status', ctx.get('orl_status') or '') if orl is not None else (ctx.get('orl_status') or '')
-    if orl_use:
-        add('ORL', 'SV-ORL-001', 'ORL measured/use-for-judgment', 'OK', f'{orl_display}; {orl_status}', 'Measured ORL và use_for_judgment=True', 'ORL có thể dùng kết luận theo ngưỡng.', 'Không cần xử lý thêm.')
-    elif orl_display:
-        add('ORL', 'SV-ORL-001', 'ORL measured/use-for-judgment', 'WARN', f'{orl_display}; {orl_status}', 'Measured ORL nếu muốn kết luận ORL', 'ORL hiện chỉ tham khảo/lower-bound/unknown, không phải kết luận measured chắc chắn.', 'Không dùng ORL để fail/pass chính nếu source không measured.')
-    else:
-        add('ORL', 'SV-ORL-001', 'ORL measured/use-for-judgment', 'INFO', 'Unknown', 'Measured ORL nếu cần đánh giá ORL', 'Không có ORL để kết luận.', 'Bỏ qua ORL hoặc kiểm tra bằng phần mềm hãng.')
 
     # Section fit health if it has already been precomputed.
     fit_rows = ctx.get('section_fit_rows') or []
@@ -9910,11 +9542,6 @@ def build_workbook_from_uploads(
     section_allow_split: bool = False,
     section_match_tolerance_m: float = 100.0,
     section_measurement_mode: str = 'fit',
-    orl_pass_threshold_db: float = 28.0,
-    orl_source_mode: str = 'auto',
-    orl_allow_lower_bound: bool = True,
-    orl_lower_bound_status: str = 'Unknown',
-    orl_physical_mode: str = 'disabled',
     output_mode: str = 'fastreporter',
     stv_total_core: Optional[int] = None,
     stv_used_core: Optional[int] = None,
@@ -9933,11 +9560,6 @@ def build_workbook_from_uploads(
         overlength_tolerance_km=overlength_tolerance_km,
         segment_start_km=segment_start_km,
         segment_end_km=segment_end_km,
-        orl_pass_threshold_db=orl_pass_threshold_db,
-        orl_source_mode=orl_source_mode,
-        orl_allow_lower_bound=orl_allow_lower_bound,
-        orl_lower_bound_status=orl_lower_bound_status,
-        orl_physical_mode=orl_physical_mode,
         logs=logs,
     )
     if not summaries:
@@ -9945,7 +9567,6 @@ def build_workbook_from_uploads(
         raise ValueError(message)
 
     event_defs = _fr_build_common_event_defs(contexts, deviation_m=deviation_m)
-    _fr_log(logs, 'run', 'INFO', 'Phase 6: ORL nâng cao; phân biệt measured ORL / metadata lower-bound / not available, thêm ORL Analysis và không tự tính ORL vật lý nếu thiếu hiệu chuẩn.')
     sections = _fr_build_common_sections(event_defs, summaries, contexts, deviation_m=deviation_m, threshold_db=threshold_db, section_merge_tolerance_m=section_merge_tolerance_m, section_min_length_km=section_min_length_km, section_event_source=section_event_source, section_boundary_priority=section_boundary_priority, section_allow_split=section_allow_split)
     if str(section_export_scope).lower() == 'selected_range' and segment_start_km is not None and segment_end_km is not None:
         sections = _fr_clip_sections_to_range(sections, segment_start_km, segment_end_km)
@@ -10032,11 +9653,6 @@ def build_workbook_from_uploads(
         section_allow_split=section_allow_split,
         section_match_tolerance_m=section_match_tolerance_m,
         section_measurement_mode=section_measurement_mode,
-        orl_pass_threshold_db=orl_pass_threshold_db,
-        orl_source_mode=orl_source_mode,
-        orl_allow_lower_bound=orl_allow_lower_bound,
-        orl_lower_bound_status=orl_lower_bound_status,
-        orl_physical_mode=orl_physical_mode,
     )
     ws_route = wb.create_sheet('Route Analysis')
     _fr_fill_route_analysis_sheet(ws_route, summaries, contexts)

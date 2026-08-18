@@ -45,4 +45,3 @@ hex_dump.py
 .vercel
 .env*
 !.env.example
-/export_history.db

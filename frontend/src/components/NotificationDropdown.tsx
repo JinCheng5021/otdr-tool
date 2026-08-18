@@ -23,7 +23,7 @@ const NotificationDropdown: React.FC = () => {
 
   const fetchNotifications = async () => {
     try {
-      const res = await fetch('http://localhost:8000/trace/api/notifications');
+      const res = await fetch('/trace/api/notifications');
       if (res.ok) {
         const json = await res.json();
         setNotifications(json.data || []);
@@ -37,6 +37,7 @@ const NotificationDropdown: React.FC = () => {
     <div className="relative" ref={dropdownRef}>
       <button 
         onClick={() => setIsOpen(!isOpen)}
+        aria-label="Thông báo"
         className="w-10 h-10 rounded-full flex items-center justify-center text-on-surface hover:bg-surface-variant transition-colors relative border-2 border-industrial-navy"
       >
         <span className="material-symbols-outlined text-[20px]">notifications</span>

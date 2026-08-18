@@ -7,8 +7,8 @@ from unittest.mock import Mock, patch
 
 from botocore.exceptions import ClientError, EndpointConnectionError
 
-from . import blob_storage
-from .blob_storage import (
+from . import r2_storage
+from .r2_storage import (
     BlobStorageConfigurationError,
     BlobStorageError,
     BlobStorageNotFoundError,
@@ -127,7 +127,7 @@ class PrivateBlobStorageTests(unittest.TestCase):
         for name in names:
             self.assertIn(name, str(raised.exception))
 
-    @patch("backend.blob_storage.boto3.client")
+    @patch("backend.r2_storage.boto3.client")
     def test_client_uses_the_cloudflare_r2_endpoint(self, client_factory) -> None:
         storage = PrivateBlobStorage(
             account_id=ACCOUNT_ID,
@@ -229,8 +229,8 @@ class PrivateBlobStorageTests(unittest.TestCase):
         storage = storage_with_client(client)
 
         with (
-            patch.object(blob_storage, "MULTIPART_UPLOAD_THRESHOLD_BYTES", 4),
-            patch.object(blob_storage, "MULTIPART_PART_SIZE_BYTES", 4),
+            patch.object(r2_storage, "MULTIPART_UPLOAD_THRESHOLD_BYTES", 4),
+            patch.object(r2_storage, "MULTIPART_PART_SIZE_BYTES", 4),
         ):
             stored = storage.upload_bytes(
                 output_path,

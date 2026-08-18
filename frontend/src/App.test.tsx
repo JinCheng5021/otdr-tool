@@ -67,6 +67,63 @@ test('renders the trace export screen', () => {
   expect(
     screen.queryByRole('button', { name: /Nạp Trace Mới/i }),
   ).not.toBeInTheDocument();
+  expect(screen.queryByText(/^ĐỊNH DẠNG HỖ TRỢ$/i)).not.toBeInTheDocument();
+  expect(screen.queryByText(/^THÔNG SỐ XỬ LÝ$/i)).not.toBeInTheDocument();
+  expect(screen.queryByText(/^CẤU TRÚC ĐẦU RA$/i)).not.toBeInTheDocument();
+});
+
+test('moves parameter modes into system options and keeps basic fields in advanced mode', () => {
+  render(<App />);
+
+  expect(screen.queryByText(/Ngưỡng ORL đạt/i)).not.toBeInTheDocument();
+  expect(screen.queryByText(/^Nguồn ORL$/i)).not.toBeInTheDocument();
+  expect(screen.queryByText(/Khi thiếu ORL đo thật/i)).not.toBeInTheDocument();
+
+  expect(
+    screen.queryByRole('button', { name: /^Thông số cơ bản$/i }),
+  ).not.toBeInTheDocument();
+  fireEvent.click(
+    screen.getByRole('button', { name: /^Tùy chọn hệ thống$/i }),
+  );
+
+  const basicModeButton = screen.getByRole('button', {
+    name: /^Thông số cơ bản$/i,
+  });
+  const advancedModeButton = screen.getByRole('button', {
+    name: /^Thông số nâng cao$/i,
+  });
+
+  fireEvent.click(advancedModeButton);
+  [
+    /^Ngưỡng Event$/i,
+    /^Ngưỡng Section Loss$/i,
+    /^Thời gian đo \(Duration\)$/i,
+    /^Dung sai gom cụm$/i,
+    /^Chiều dài tuyến chuẩn$/i,
+    /^Sai số đủ tuyến$/i,
+    /^Kiểu file đầu ra$/i,
+    /^Thông số Core$/i,
+  ].forEach((label) => {
+    expect(screen.getByText(label)).toBeVisible();
+  });
+  expect(screen.getByText(/^Xuất section theo$/i)).toBeVisible();
+
+  fireEvent.click(screen.getByRole('button', { name: /Kiểm tra theo đoạn/i }));
+  const scopeLabel = screen.getByText(/^Xuất section theo$/i);
+  const scopeSelect = scopeLabel.parentElement?.querySelector('select');
+  const segmentStart = screen.getByPlaceholderText('Ví dụ: 38.000');
+  const segmentEnd = screen.getByPlaceholderText('Ví dụ: 40.000');
+
+  expect(scopeSelect).toHaveValue('selected_range');
+  fireEvent.change(segmentStart, { target: { value: '8.5' } });
+  fireEvent.change(segmentEnd, { target: { value: '9.5' } });
+
+  fireEvent.click(basicModeButton);
+  fireEvent.click(advancedModeButton);
+
+  expect(scopeSelect).toHaveValue('all');
+  expect(segmentStart).toHaveValue(null);
+  expect(segmentEnd).toHaveValue(null);
 });
 
 test('shows route graph navigation in its own header', () => {
@@ -246,4 +303,24 @@ test('shares a route-graph input batch back to the Excel export screen', async (
   fireEvent.click(screen.getByTitle('Trở về Menu'));
   expect(await screen.findByText('1 file đã chọn')).toBeInTheDocument();
   expect(screen.getByText('from-graph.sor')).toBeInTheDocument();
+});
+
+test('loads history and notifications through deploy-safe trace endpoints', async () => {
+  render(<App />);
+
+  fireEvent.click(
+    screen.getAllByRole('button', { name: /Lịch sử xuất file/i })[0],
+  );
+  await waitFor(() => {
+    expect(global.fetch).toHaveBeenCalledWith('/trace/api/history');
+  });
+
+  fireEvent.click(screen.getByRole('button', { name: /^Thông báo$/i }));
+  await waitFor(() => {
+    expect(global.fetch).toHaveBeenCalledWith('/trace/api/notifications');
+  });
+
+  expect(global.fetch).not.toHaveBeenCalledWith(
+    expect.stringContaining('localhost:8000'),
+  );
 });

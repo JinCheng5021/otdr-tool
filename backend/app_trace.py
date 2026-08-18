@@ -7,7 +7,6 @@ import hmac
 import io
 import json
 import time
-import sqlite3
 import os
 from uuid import UUID, uuid4
 
@@ -17,8 +16,13 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Iterable, List
 
+from .history_storage import (
+    HistoryStorageConfigurationError,
+    HistoryStorageError,
+    get_history_storage,
+)
 from .msor_converter import build_workbook_from_uploads
-from .blob_storage import (
+from .r2_storage import (
     DEFAULT_MAX_DOWNLOAD_BYTES,
     MULTIPART_PART_SIZE_BYTES,
     MULTIPART_UPLOAD_THRESHOLD_BYTES,
@@ -38,29 +42,7 @@ from .blob_storage import (
     job_id_from_output_path,
 )
 
-DB_FILE = "/tmp/export_history.db" if os.environ.get("VERCEL") else "export_history.db"
 STORAGE_SESSION_LIFETIME_SECONDS = 60 * 60
-
-def init_db():
-    # Bỏ qua lỗi nếu hệ thống file hoàn toàn read-only và không có /tmp
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS export_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                exporter_name TEXT,
-                unit TEXT,
-                route_name TEXT,
-                export_time TEXT
-            )
-        ''')
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"Warning: Could not initialize database. {e}")
-
-init_db()
 
 app = FastAPI(title='FPT Telecom Trace')
 
@@ -287,10 +269,17 @@ HTML_PAGE = """<!DOCTYPE html>
 <span class="material-symbols-outlined text-[20px]">history</span>
 <span class="text-sm">Lịch sử xuất file</span>
 </button>
-<button class="flex items-center gap-3 px-3 py-2 text-left rounded-lg text-on-surface-variant hover:bg-surface-variant transition-colors font-medium">
-<span class="material-symbols-outlined text-[20px]">settings</span>
-<span class="text-sm">Tùy chọn hệ thống</span>
+<div class="flex flex-col">
+<button type="button" id="systemOptionsButton" aria-expanded="false" aria-controls="systemOptionsMenu" class="flex items-center gap-3 px-3 py-2 text-left rounded-lg text-on-surface-variant hover:bg-surface-variant transition-colors font-medium">
+<span class="material-symbols-outlined text-[20px]" aria-hidden="true">settings</span>
+<span class="text-sm flex-1">Tùy chọn hệ thống</span>
+<span class="material-symbols-outlined text-[18px] transition-transform" id="systemOptionsChevron" aria-hidden="true">expand_more</span>
 </button>
+<div id="systemOptionsMenu" class="hidden mt-1 ml-4 pl-3 border-l border-outline-variant flex flex-col gap-1">
+<button type="button" data-mode="basic" aria-pressed="true" class="w-full px-3 py-2 text-left rounded-lg text-xs font-bold text-primary bg-primary-fixed/50 border border-primary/10">Thông số cơ bản</button>
+<button type="button" data-mode="advanced" aria-pressed="false" class="w-full px-3 py-2 text-left rounded-lg text-xs font-medium text-on-surface-variant hover:bg-surface-variant">Thông số nâng cao</button>
+</div>
+</div>
 </nav>
 </div>
 <div class="mt-auto bg-surface-container-high/50 p-4 rounded-xl border border-outline-variant">
@@ -342,39 +331,8 @@ HTML_PAGE = """<!DOCTYPE html>
 </div>
 <div class="status mt-2 p-4 rounded-xl text-sm hidden" id="status"></div>
 </section>
-<!-- Stats Bento Grid -->
-<section class="grid grid-cols-1 md:grid-cols-3 gap-4 opacity-0 animate-fade-up stagger-2">
-<div class="bg-white border border-outline-variant rounded-xl p-5 flex flex-col relative overflow-hidden group">
-<div class="absolute inset-0 shimmer-effect opacity-0 group-hover:opacity-100 transition-opacity"></div>
-<span class="text-[10px] font-bold text-on-surface-variant tracking-widest uppercase mb-4">ĐỊNH DẠNG HỖ TRỢ</span>
-<div class="flex items-baseline gap-2">
-<span class="font-mono-data text-4xl text-industrial-navy tracking-tighter">03</span>
-<span class="text-xs text-on-surface-variant font-medium">TIÊU CHUẨN</span>
-</div>
-</div>
-<div class="bg-white border border-outline-variant rounded-xl p-5 flex flex-col relative overflow-hidden group">
-<div class="absolute inset-0 shimmer-effect opacity-0 group-hover:opacity-100 transition-opacity"></div>
-<span class="text-[10px] font-bold text-on-surface-variant tracking-widest uppercase mb-4">THÔNG SỐ XỬ LÝ</span>
-<div class="flex items-baseline gap-2">
-<span class="font-mono-data text-4xl text-industrial-navy tracking-tighter">07</span>
-<span class="text-xs text-on-surface-variant font-medium">CHỈ SỐ KPI</span>
-</div>
-</div>
-<div class="bg-white border border-outline-variant rounded-xl p-5 flex flex-col relative overflow-hidden group">
-<div class="absolute inset-0 shimmer-effect opacity-0 group-hover:opacity-100 transition-opacity"></div>
-<span class="text-[10px] font-bold text-on-surface-variant tracking-widest uppercase mb-4">CẤU TRÚC ĐẦU RA</span>
-<div class="flex items-baseline gap-2">
-<span class="font-mono-data text-4xl text-industrial-navy tracking-tighter">03</span>
-<span class="text-xs text-on-surface-variant font-medium">SHEET CHÍNH</span>
-</div>
-</div>
-</section>
 <!-- Configuration Settings Panel -->
 <section class="glass-card rounded-2xl overflow-hidden flex flex-col opacity-0 animate-fade-up stagger-3 border border-outline-variant shadow-sm">
-<div class="flex bg-surface-container-high/30 px-4 pt-3 gap-1">
-<button type="button" data-mode="basic" class="px-6 py-3 text-[12px] font-bold tracking-widest text-primary border-b-2 border-primary bg-white/50 rounded-t-lg">THÔNG SỐ CƠ BẢN</button>
-<button type="button" data-mode="advanced" class="px-6 py-3 text-[12px] font-bold tracking-widest text-on-surface-variant hover:text-primary transition-colors">THIẾT LẬP NÂNG CAO</button>
-</div>
 <div class="p-8 flex flex-col gap-6 w-full">
   
   <!-- QUICK PRESETS ROW -->
@@ -590,39 +548,7 @@ HTML_PAGE = """<!DOCTYPE html>
       <p class="text-[11px] text-on-surface-variant font-medium">Công thức toán học ước lượng suy hao riêng đoạn.</p>
     </div>
 
-    <div class="space-y-2" data-level="advanced">
-      <div class="flex justify-between items-end">
-        <label class="text-[13px] font-bold text-industrial-navy uppercase tracking-wider">Ngưỡng ORL đạt</label>
-        <span class="text-[11px] font-bold text-on-surface-variant px-1.5 py-0.5 bg-surface-container-high rounded font-mono-data">dB</span>
-      </div>
-      <input class="w-full bg-white border border-outline-variant rounded-lg px-4 py-3 font-mono-data text-lg text-industrial-navy focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all outline-none" step="0.1" type="number" id="orlPassThreshold" value="28.0"/>
-      <p class="text-[11px] text-on-surface-variant font-medium">Giá trị tối thiểu để kết luận ORL đạt chuẩn.</p>
-    </div>
-
-    <div class="space-y-2" data-level="advanced">
-      <label class="text-[13px] font-bold text-industrial-navy uppercase tracking-wider">Nguồn ORL</label>
-      <select class="w-full bg-white border border-outline-variant rounded-lg px-4 py-3 font-body-sm text-on-surface focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all outline-none" id="orlSourceMode">
-        <option value="auto" selected>Tự động (Ưu tiên ORL đo thật)</option>
-        <option value="trace">Lấy từ đồ thị quang</option>
-      </select>
-      <p class="text-[11px] text-on-surface-variant font-medium">Lựa chọn nguồn dữ liệu ORL gốc để phân tích.</p>
-    </div>
-
-    <div class="space-y-2" data-level="advanced">
-      <label class="text-[13px] font-bold text-industrial-navy uppercase tracking-wider">Khi thiếu ORL đo thật</label>
-      <select class="w-full bg-white border border-outline-variant rounded-lg px-4 py-3 font-body-sm text-on-surface focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all outline-none" id="orlMissingPolicy">
-        <option value="blank">Để trống</option>
-        <option value="reference" selected>Hiện giá trị tham khảo nếu có</option>
-        <option value="trace_check">Tự kiểm tra điều kiện ORL từ trace</option>
-      </select>
-      <p class="text-[11px] text-on-surface-variant font-medium">Phương án giải quyết khi file đo gốc bị thiếu ORL.</p>
-    </div>
   </div>
-
-  <!-- Hidden inputs for ORL mapping -->
-  <input type="hidden" id="orlAllowLowerBound" value="true" />
-  <input type="hidden" id="orlLowerBoundStatus" value="Unknown" />
-  <input type="hidden" id="orlPhysicalMode" value="disabled" />
 </div></section>
 <!-- Action Area -->
 <section class="opacity-0 animate-fade-up stagger-4">
@@ -750,15 +676,12 @@ HTML_PAGE = """<!DOCTYPE html>
     const sectionAllowSplitEl = document.getElementById('sectionAllowSplit');
     const sectionMatchToleranceEl = document.getElementById('sectionMatchTolerance');
     const sectionMeasurementModeEl = document.getElementById('sectionMeasurementMode');
-    const orlPassThresholdEl = document.getElementById('orlPassThreshold');
-    const orlSourceModeEl = document.getElementById('orlSourceMode');
-    const orlMissingPolicyEl = document.getElementById('orlMissingPolicy');
-    const orlAllowLowerBoundEl = document.getElementById('orlAllowLowerBound');
-    const orlLowerBoundStatusEl = document.getElementById('orlLowerBoundStatus');
-    const orlPhysicalModeEl = document.getElementById('orlPhysicalMode');
     const outputModeEl = document.getElementById('outputMode');
     const stvTotalCoreEl = document.getElementById('stvTotalCore');
     const stvUsedCoreEl = document.getElementById('stvUsedCore');
+    const systemOptionsButton = document.getElementById('systemOptionsButton');
+    const systemOptionsMenu = document.getElementById('systemOptionsMenu');
+    const systemOptionsChevron = document.getElementById('systemOptionsChevron');
     const modeButtons = Array.from(document.querySelectorAll('[data-mode]'));
     const presetButtons = Array.from(document.querySelectorAll('[data-preset]'));
     const advancedCards = Array.from(document.querySelectorAll('[data-level="advanced"]'));
@@ -766,51 +689,39 @@ HTML_PAGE = """<!DOCTYPE html>
     const STORAGE_KEY = 'fpt-telecom-trace-settings-stitch-v2';
     let parameterMode = 'basic';
     let lastPreset = '';
-    let lastOrlPreset = '';
 
     const fieldMap = {
       threshold: thresholdEl, sectionThreshold: sectionThresholdEl, durationThreshold: durationThresholdEl, deviation: deviationEl, expectedLength: expectedLengthEl, routeTolerance: routeToleranceEl,
       segmentStart: segmentStartEl, segmentEnd: segmentEndEl, sectionExportScope: sectionExportScopeEl, sectionMergeTolerance: sectionMergeToleranceEl,
       sectionMinLength: sectionMinLengthEl, sectionEventSource: sectionEventSourceEl, sectionBoundaryPriority: sectionBoundaryPriorityEl,
       sectionAllowSplit: sectionAllowSplitEl, sectionMatchTolerance: sectionMatchToleranceEl, sectionMeasurementMode: sectionMeasurementModeEl,
-      orlPassThreshold: orlPassThresholdEl, orlSourceMode: orlSourceModeEl, orlMissingPolicy: orlMissingPolicyEl, orlAllowLowerBound: orlAllowLowerBoundEl,
-      orlLowerBoundStatus: orlLowerBoundStatusEl, orlPhysicalMode: orlPhysicalModeEl,
       outputMode: outputModeEl,
       sectionDetailLevel: document.getElementById('sectionDetailLevel')
     };
 
+    function resetSectionRange() {
+      if (sectionExportScopeEl) sectionExportScopeEl.value = 'all';
+      if (segmentStartEl) segmentStartEl.value = '';
+      if (segmentEndEl) segmentEndEl.value = '';
+    }
+
     function setParameterMode(mode, shouldSave = true) {
       parameterMode = mode === 'advanced' ? 'advanced' : 'basic';
+      if (parameterMode === 'basic') resetSectionRange();
       const showAdvanced = parameterMode === 'advanced';
       advancedCards.forEach(card => card.classList.toggle('advanced-hidden', !showAdvanced));
       modeButtons.forEach(btn => {
         const isActive = btn.dataset.mode === parameterMode;
         btn.className = isActive 
-          ? "px-6 py-3 text-[12px] font-bold tracking-widest text-primary border-b-2 border-primary bg-white/50 rounded-t-lg"
-          : "px-6 py-3 text-[12px] font-bold tracking-widest text-on-surface-variant hover:text-primary transition-colors";
+          ? "w-full px-3 py-2 text-left rounded-lg text-xs font-bold text-primary bg-primary-fixed/50 border border-primary/10"
+          : "w-full px-3 py-2 text-left rounded-lg text-xs font-medium text-on-surface-variant hover:bg-surface-variant";
+        btn.setAttribute('aria-pressed', String(isActive));
       });
+      syncHiddenSectionControls();
       if (shouldSave) saveSettings();
     }
 
-    function applyOrlMissingPolicy() {
-      const policy = (orlMissingPolicyEl && orlMissingPolicyEl.value) || 'reference';
-      if (policy === 'blank') {
-        orlAllowLowerBoundEl.value = 'false';
-        orlLowerBoundStatusEl.value = 'Unknown';
-        orlPhysicalModeEl.value = 'disabled';
-      } else if (policy === 'trace_check') {
-        orlAllowLowerBoundEl.value = 'true';
-        orlLowerBoundStatusEl.value = 'Unknown';
-        orlPhysicalModeEl.value = 'diagnostic';
-      } else {
-        orlAllowLowerBoundEl.value = 'true';
-        orlLowerBoundStatusEl.value = 'Unknown';
-        orlPhysicalModeEl.value = 'disabled';
-      }
-    }
-
     function collectSettings() {
-      applyOrlMissingPolicy();
       return Object.fromEntries(Object.entries(fieldMap).map(([k, el]) => [k, el ? el.value : '']));
     }
 
@@ -818,7 +729,6 @@ HTML_PAGE = """<!DOCTYPE html>
       const payload = collectSettings();
       payload.__parameterMode = parameterMode;
       payload.__lastPreset = lastPreset;
-      payload.__lastOrlPreset = lastOrlPreset;
       localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
       updatePresetVisuals();
     }
@@ -831,15 +741,8 @@ HTML_PAGE = """<!DOCTYPE html>
         Object.entries(fieldMap).forEach(([k, el]) => {
           if (el && parsed[k] !== undefined && parsed[k] !== null) el.value = parsed[k];
         });
-        if (!parsed.orlMissingPolicy && orlMissingPolicyEl) {
-          if (String(parsed.orlPhysicalMode || '').toLowerCase() === 'diagnostic') orlMissingPolicyEl.value = 'trace_check';
-          else if (String(parsed.orlAllowLowerBound || '').toLowerCase() === 'false') orlMissingPolicyEl.value = 'blank';
-          else orlMissingPolicyEl.value = 'reference';
-        }
-        applyOrlMissingPolicy();
         setParameterMode(parsed.__parameterMode || 'basic', false);
         lastPreset = parsed.__lastPreset || '';
-        lastOrlPreset = parsed.__lastOrlPreset || '';
         updatePresetVisuals();
       } catch (err) {
         console.warn('Lỗi load settings:', err);
@@ -884,6 +787,10 @@ HTML_PAGE = """<!DOCTYPE html>
         if (sectionMinLengthEl) sectionMinLengthEl.value = '0';
         if (sectionAllowSplitEl) sectionAllowSplitEl.value = 'false';
         if (sectionExportScopeEl) sectionExportScopeEl.value = 'selected_range';
+      }
+      if (preset !== 'range') {
+        if (segmentStartEl) segmentStartEl.value = '';
+        if (segmentEndEl) segmentEndEl.value = '';
       }
       syncHiddenSectionControls();
       saveSettings();
@@ -1046,12 +953,6 @@ HTML_PAGE = """<!DOCTYPE html>
       form.append('section_allow_split', sectionAllowSplitEl ? sectionAllowSplitEl.value : 'false');
       form.append('section_match_tolerance_m', sectionMatchToleranceEl ? sectionMatchToleranceEl.value : '100');
       form.append('section_measurement_mode', sectionMeasurementModeEl ? sectionMeasurementModeEl.value : 'fit');
-      form.append('orl_pass_threshold_db', orlPassThresholdEl ? orlPassThresholdEl.value : '28.0');
-      form.append('orl_source_mode', orlSourceModeEl ? orlSourceModeEl.value : 'auto');
-      form.append('orl_missing_policy', orlMissingPolicyEl ? orlMissingPolicyEl.value : 'reference');
-      form.append('orl_allow_lower_bound', orlAllowLowerBoundEl ? orlAllowLowerBoundEl.value : 'true');
-      form.append('orl_lower_bound_status', orlLowerBoundStatusEl ? orlLowerBoundStatusEl.value : 'Unknown');
-      form.append('orl_physical_mode', orlPhysicalModeEl ? orlPhysicalModeEl.value : 'disabled');
       form.append('output_mode', outputModeEl ? outputModeEl.value : 'fastreporter');
       form.append('stv_total_core', stvTotalCoreEl ? stvTotalCoreEl.value : '');
       form.append('stv_used_core', stvUsedCoreEl ? stvUsedCoreEl.value : '');
@@ -1132,7 +1033,7 @@ HTML_PAGE = """<!DOCTYPE html>
         if(historyModal) historyModal.classList.remove('hidden');
         if(historyTableBody) historyTableBody.innerHTML = '<tr><td colspan="4" class="p-6 text-center text-on-surface-variant animate-pulse">Đang tải dữ liệu...</td></tr>';
         try {
-            const res = await fetch('/api/history');
+            const res = await fetch('/trace/api/history');
             const data = await res.json();
             if (data.status === 'success') {
                 if (data.data.length === 0) {
@@ -1231,14 +1132,29 @@ HTML_PAGE = """<!DOCTYPE html>
       if (el) {
         el.addEventListener('change', () => {
           if (el !== fieldMap.sectionDetailLevel) lastPreset = '';
-          if (el === sectionMergeToleranceEl) syncHiddenSectionControls();
-          applyOrlMissingPolicy();
+          if (el === sectionExportScopeEl) {
+            if (sectionExportScopeEl.value !== 'selected_range') {
+              if (segmentStartEl) segmentStartEl.value = '';
+              if (segmentEndEl) segmentEndEl.value = '';
+            }
+            syncHiddenSectionControls();
+          }
           saveSettings();
         });
       }
     });
 
     modeButtons.forEach(btn => btn.addEventListener('click', () => setParameterMode(btn.dataset.mode)));
+    if (systemOptionsButton && systemOptionsMenu) {
+      systemOptionsButton.addEventListener('click', () => {
+        const shouldOpen = systemOptionsMenu.classList.contains('hidden');
+        systemOptionsMenu.classList.toggle('hidden', !shouldOpen);
+        systemOptionsButton.setAttribute('aria-expanded', String(shouldOpen));
+        if (systemOptionsChevron) {
+          systemOptionsChevron.style.transform = shouldOpen ? 'rotate(180deg)' : 'rotate(0deg)';
+        }
+      });
+    }
     presetButtons.forEach(btn => btn.addEventListener('click', () => applyPreset(btn.dataset.preset)));
 
     // Realtime Notifications & Route Export Counter Logic
@@ -1247,7 +1163,7 @@ HTML_PAGE = """<!DOCTYPE html>
 
     async function fetchNotifications() {
       try {
-        const res = await fetch('/api/notifications');
+        const res = await fetch('/trace/api/notifications');
         if (!res.ok) return;
         const json = await res.json();
         if (json.status === 'success' && json.data) {
@@ -1374,6 +1290,7 @@ HTML_PAGE = """<!DOCTYPE html>
     setInterval(fetchNotifications, 5000);
 
     loadSettings();
+    setParameterMode(parameterMode, false);
     syncHiddenSectionControls();
 
   </script>
@@ -1599,26 +1516,10 @@ def _record_export_history(
     unit: str,
     route_name: str,
 ) -> None:
-    readable_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     try:
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute(
-            '''
-                INSERT INTO export_history (
-                    exporter_name,
-                    unit,
-                    route_name,
-                    export_time
-                )
-                VALUES (?, ?, ?, ?)
-            ''',
-            (exporter_name, unit, route_name, readable_time),
-        )
-        conn.commit()
-        conn.close()
-    except Exception as exc:
-        print(f"Lỗi ghi lịch sử: {exc}")
+        get_history_storage().record_export(exporter_name, unit, route_name)
+    except HistoryStorageError as exc:
+        print(f"Warning: Could not record export history in Supabase. {exc}")
 
 
 def _build_export_response(
@@ -1643,12 +1544,6 @@ def _build_export_response(
     section_allow_split: str,
     section_match_tolerance_m: float,
     section_measurement_mode: str,
-    orl_pass_threshold_db: float,
-    orl_source_mode: str,
-    orl_missing_policy: str,
-    orl_allow_lower_bound: str,
-    orl_lower_bound_status: str,
-    orl_physical_mode: str,
     output_mode: str,
     stv_total_core: str,
     stv_used_core: str,
@@ -1659,12 +1554,11 @@ def _build_export_response(
 
     segment_start_value = None
     segment_end_value = None
-    if segment_start_km.strip():
-        segment_start_value = float(segment_start_km.strip())
-    if segment_end_km.strip():
-        segment_end_value = float(segment_end_km.strip())
-
     if section_export_scope == 'selected_range':
+        if segment_start_km.strip():
+            segment_start_value = float(segment_start_km.strip())
+        if segment_end_km.strip():
+            segment_end_value = float(segment_end_km.strip())
         if segment_start_value is None or segment_end_value is None:
             raise HTTPException(
                 status_code=400,
@@ -1675,42 +1569,6 @@ def _build_export_response(
                 status_code=400,
                 detail='Đoạn kết thúc phải lớn hơn Đoạn bắt đầu.',
             )
-    else:
-        if (segment_start_value is None) ^ (segment_end_value is None):
-            segment_start_value = None
-            segment_end_value = None
-        elif (
-            segment_start_value is not None
-            and segment_end_value is not None
-            and segment_end_value <= segment_start_value
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail='Đoạn kết thúc phải lớn hơn Đoạn bắt đầu nếu muốn phân tích thêm một đoạn riêng.',
-            )
-
-    policy = str(orl_missing_policy or '').strip().lower()
-    if policy in {'blank', 'empty', 'none', 'off', 'false'}:
-        derived_orl_allow_lower_bound = False
-        derived_orl_lower_bound_status = 'Unknown'
-        derived_orl_physical_mode = 'disabled'
-    elif policy in {'trace_check', 'trace', 'diagnostic', 'auto_trace'}:
-        derived_orl_allow_lower_bound = True
-        derived_orl_lower_bound_status = 'Unknown'
-        derived_orl_physical_mode = 'diagnostic'
-    elif policy in {'reference', 'show_reference', 'lower_bound', 'metadata'}:
-        derived_orl_allow_lower_bound = True
-        derived_orl_lower_bound_status = 'Unknown'
-        derived_orl_physical_mode = 'disabled'
-    else:
-        derived_orl_allow_lower_bound = str(orl_allow_lower_bound).lower() in {
-            '1',
-            'true',
-            'yes',
-            'on',
-        }
-        derived_orl_lower_bound_status = orl_lower_bound_status or 'Unknown'
-        derived_orl_physical_mode = orl_physical_mode or 'disabled'
 
     section_threshold_value = None
     if section_threshold_db.strip():
@@ -1760,11 +1618,6 @@ def _build_export_response(
         },
         section_match_tolerance_m=section_match_tolerance_m,
         section_measurement_mode=section_measurement_mode,
-        orl_pass_threshold_db=orl_pass_threshold_db,
-        orl_source_mode=orl_source_mode,
-        orl_allow_lower_bound=derived_orl_allow_lower_bound,
-        orl_lower_bound_status=derived_orl_lower_bound_status,
-        orl_physical_mode=derived_orl_physical_mode,
         output_mode=output_mode,
         stv_total_core=stv_total_core_value,
         stv_used_core=stv_used_core_value,
@@ -1802,12 +1655,6 @@ async def convert(
     section_allow_split: str = Form('false'),
     section_match_tolerance_m: float = Form(100.0),
     section_measurement_mode: str = Form('fit'),
-    orl_pass_threshold_db: float = Form(28.0),
-    orl_source_mode: str = Form('auto'),
-    orl_missing_policy: str = Form('reference'),
-    orl_allow_lower_bound: str = Form('true'),
-    orl_lower_bound_status: str = Form('Unknown'),
-    orl_physical_mode: str = Form('disabled'),
     output_mode: str = Form('fastreporter'),
     exporter_name: str = Form(''),
     unit: str = Form(''),
@@ -1857,12 +1704,6 @@ async def convert(
         section_allow_split=section_allow_split,
         section_match_tolerance_m=section_match_tolerance_m,
         section_measurement_mode=section_measurement_mode,
-        orl_pass_threshold_db=orl_pass_threshold_db,
-        orl_source_mode=orl_source_mode,
-        orl_missing_policy=orl_missing_policy,
-        orl_allow_lower_bound=orl_allow_lower_bound,
-        orl_lower_bound_status=orl_lower_bound_status,
-        orl_physical_mode=orl_physical_mode,
         output_mode=output_mode,
         stv_total_core=stv_total_core,
         stv_used_core=stv_used_core,
@@ -2215,12 +2056,6 @@ async def convert_from_blob(
     section_allow_split: str = Form('false'),
     section_match_tolerance_m: float = Form(100.0),
     section_measurement_mode: str = Form('fit'),
-    orl_pass_threshold_db: float = Form(28.0),
-    orl_source_mode: str = Form('auto'),
-    orl_missing_policy: str = Form('reference'),
-    orl_allow_lower_bound: str = Form('true'),
-    orl_lower_bound_status: str = Form('Unknown'),
-    orl_physical_mode: str = Form('disabled'),
     output_mode: str = Form('fastreporter'),
     exporter_name: str = Form(''),
     unit: str = Form(''),
@@ -2358,12 +2193,6 @@ async def convert_from_blob(
                 section_allow_split=section_allow_split,
                 section_match_tolerance_m=section_match_tolerance_m,
                 section_measurement_mode=section_measurement_mode,
-                orl_pass_threshold_db=orl_pass_threshold_db,
-                orl_source_mode=orl_source_mode,
-                orl_missing_policy=orl_missing_policy,
-                orl_allow_lower_bound=orl_allow_lower_bound,
-                orl_lower_bound_status=orl_lower_bound_status,
-                orl_physical_mode=orl_physical_mode,
                 output_mode=output_mode,
                 stv_total_core=stv_total_core,
                 stv_used_core=stv_used_core,
@@ -2408,63 +2237,53 @@ async def convert_from_blob(
     )
 
 @app.get('/api/history')
-async def get_history() -> JSONResponse:
+def get_history() -> JSONResponse:
     try:
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute('SELECT id, exporter_name, unit, route_name, export_time FROM export_history ORDER BY id DESC LIMIT 100')
-        rows = c.fetchall()
-        conn.close()
-        history = [
-            {
-                "id": r[0],
-                "exporter_name": r[1],
-                "unit": r[2],
-                "route_name": r[3],
-                "export_time": r[4]
-            }
-            for r in rows
-        ]
+        history = get_history_storage().list_history()
         return JSONResponse(content={"status": "success", "data": history})
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"status": "error", "detail": str(e)})
+    except HistoryStorageConfigurationError as exc:
+        print(f"Supabase history configuration error: {exc}")
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "error",
+                "detail": "Supabase history storage is not configured.",
+            },
+        )
+    except HistoryStorageError as exc:
+        print(f"Supabase history read error: {exc}")
+        return JSONResponse(
+            status_code=502,
+            content={
+                "status": "error",
+                "detail": "Could not retrieve export history from Supabase.",
+            },
+        )
 
 
 @app.get('/api/notifications')
-async def get_notifications() -> JSONResponse:
+def get_notifications() -> JSONResponse:
     try:
-        import sqlite3
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute('SELECT id, exporter_name, unit, route_name, export_time FROM export_history ORDER BY id DESC LIMIT 50')
-        rows = c.fetchall()
-        
-        notifications = []
-        for r in rows:
-            nid, name, unit, route, time_str = r
-            month_str = time_str[:7] if (time_str and len(time_str) >= 7) else ""
-            month_name = time_str[5:7] if (time_str and len(time_str) >= 7) else ""
-            
-            if route and month_str:
-                c.execute('SELECT COUNT(*) FROM export_history WHERE route_name = ? AND export_time LIKE ?', (route, f"{month_str}%"))
-                count = c.fetchone()[0]
-            else:
-                count = 1
-            
-            msg = f"Nhân sự {name} ({unit}) vừa xuất tuyến {route}. Tuyến này đã được xuất {count} lần trong tháng {month_name}."
-            notifications.append({
-                "id": nid,
-                "message": msg,
-                "export_time": time_str,
-                "exporter_name": name,
-                "route_name": route,
-                "count": count
-            })
-            
-        conn.close()
+        notifications = get_history_storage().list_notifications()
         return JSONResponse(content={"status": "success", "data": notifications})
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"status": "error", "detail": str(e)})
+    except HistoryStorageConfigurationError as exc:
+        print(f"Supabase notification configuration error: {exc}")
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "error",
+                "detail": "Supabase history storage is not configured.",
+            },
+        )
+    except HistoryStorageError as exc:
+        print(f"Supabase notification read error: {exc}")
+        return JSONResponse(
+            status_code=502,
+            content={
+                "status": "error",
+                "detail": "Could not retrieve export notifications from Supabase.",
+            },
+        )
 
 
 

@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import Modals from './Modals';
 import {
   type StorageConversionResult,
@@ -17,12 +17,16 @@ interface TraceViewerProps {
   files: File[];
   replaceInputFiles: (files: File[]) => InputFileSelection;
   clearInputFiles: () => void;
+  parameterMode: 'basic' | 'advanced';
+  onParameterModeChange: (mode: 'basic' | 'advanced') => void;
 }
 
 const TraceViewer: React.FC<TraceViewerProps> = ({
   files,
   replaceInputFiles,
   clearInputFiles,
+  parameterMode,
+  onParameterModeChange,
 }) => {
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -31,9 +35,7 @@ const TraceViewer: React.FC<TraceViewerProps> = ({
   const [status, setStatus] = useState<{ message: string; type: 'error' | 'success' | 'info' } | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [readyReport, setReadyReport] = useState<StorageConversionResult | null>(null);
-
-  // Settings Tabs
-  const [activeTab, setActiveTab] = useState<'basic' | 'advanced'>('basic');
+  const activeTab = parameterMode;
 
   // Modals state
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
@@ -61,30 +63,39 @@ const TraceViewer: React.FC<TraceViewerProps> = ({
   const [sectionAllowSplit, setSectionAllowSplit] = useState('false');
   const [sectionMatchTolerance, setSectionMatchTolerance] = useState('100');
   const [sectionMeasurementMode, setSectionMeasurementMode] = useState('fit');
-  const [orlPassThreshold, setOrlPassThreshold] = useState('28.0');
-  const [orlSourceMode, setOrlSourceMode] = useState('auto');
-  const [orlMissingPolicy, setOrlMissingPolicy] = useState('reference');
 
-  // Hidden params
-  const orlAllowLowerBound = 'true';
-  const orlLowerBoundStatus = 'Unknown';
-  const orlPhysicalMode = 'disabled';
+  const resetSectionRange = () => {
+    setSectionExportScope('all');
+    setSegmentStart('');
+    setSegmentEnd('');
+  };
+
+  useEffect(() => {
+    if (parameterMode === 'basic') {
+      setSectionExportScope('all');
+      setSegmentStart('');
+      setSegmentEnd('');
+    }
+  }, [parameterMode]);
 
   const applyPreset = (preset: string) => {
     switch (preset) {
       case 'compact':
+        resetSectionRange();
         setSectionDetailLevel('minimum');
         setDeviation('15');
         setSectionMergeTolerance('300');
         setSectionAllowSplit('false');
         break;
       case 'daily':
+        resetSectionRange();
         setSectionDetailLevel('balanced');
         setDeviation('5');
         setSectionMergeTolerance('100');
         setSectionAllowSplit('false');
         break;
       case 'detailed':
+        resetSectionRange();
         setSectionDetailLevel('maximum');
         setDeviation('2');
         setSectionMergeTolerance('20');
@@ -92,7 +103,7 @@ const TraceViewer: React.FC<TraceViewerProps> = ({
         break;
       case 'range':
         setSectionExportScope('selected_range');
-        setActiveTab('advanced');
+        onParameterModeChange('advanced');
         break;
     }
   };
@@ -206,13 +217,6 @@ const TraceViewer: React.FC<TraceViewerProps> = ({
       formData.append('section_allow_split', sectionAllowSplit);
       formData.append('section_match_tolerance_m', sectionMatchTolerance);
       formData.append('section_measurement_mode', sectionMeasurementMode);
-
-      formData.append('orl_pass_threshold_db', orlPassThreshold);
-      formData.append('orl_source_mode', orlSourceMode);
-      formData.append('orl_missing_policy', orlMissingPolicy);
-      formData.append('orl_allow_lower_bound', orlAllowLowerBound);
-      formData.append('orl_lower_bound_status', orlLowerBoundStatus);
-      formData.append('orl_physical_mode', orlPhysicalMode);
 
       formData.append('output_mode', outputMode);
       formData.append('exporter_name', exportData.exporterName);
@@ -370,53 +374,8 @@ const TraceViewer: React.FC<TraceViewerProps> = ({
         )}
       </section>
 
-      {/* Stats Bento Grid */}
-      <section className="grid grid-cols-1 md:grid-cols-3 gap-4 opacity-0 animate-fade-up stagger-2" style={{ animationFillMode: 'forwards' }}>
-        <div className="bg-white border border-outline-variant rounded-xl p-5 flex flex-col relative overflow-hidden group">
-          <div className="absolute inset-0 shimmer-effect opacity-0 group-hover:opacity-100 transition-opacity"></div>
-          <span className="text-[10px] font-bold text-on-surface-variant tracking-widest uppercase mb-4">ĐỊNH DẠNG HỖ TRỢ</span>
-          <div className="flex items-baseline gap-2">
-            <span className="font-mono-data text-4xl text-industrial-navy tracking-tighter">03</span>
-            <span className="text-xs text-on-surface-variant font-medium">TIÊU CHUẨN</span>
-          </div>
-        </div>
-        <div className="bg-white border border-outline-variant rounded-xl p-5 flex flex-col relative overflow-hidden group">
-          <div className="absolute inset-0 shimmer-effect opacity-0 group-hover:opacity-100 transition-opacity"></div>
-          <span className="text-[10px] font-bold text-on-surface-variant tracking-widest uppercase mb-4">THÔNG SỐ XỬ LÝ</span>
-          <div className="flex items-baseline gap-2">
-            <span className="font-mono-data text-4xl text-industrial-navy tracking-tighter">07</span>
-            <span className="text-xs text-on-surface-variant font-medium">CHỈ SỐ KPI</span>
-          </div>
-        </div>
-        <div className="bg-white border border-outline-variant rounded-xl p-5 flex flex-col relative overflow-hidden group">
-          <div className="absolute inset-0 shimmer-effect opacity-0 group-hover:opacity-100 transition-opacity"></div>
-          <span className="text-[10px] font-bold text-on-surface-variant tracking-widest uppercase mb-4">CẤU TRÚC ĐẦU RA</span>
-          <div className="flex items-baseline gap-2">
-            <span className="font-mono-data text-4xl text-industrial-navy tracking-tighter">03</span>
-            <span className="text-xs text-on-surface-variant font-medium">SHEET CHÍNH</span>
-          </div>
-        </div>
-      </section>
-
       {/* Configuration Settings Panel */}
       <section className="glass-card rounded-2xl overflow-hidden flex flex-col opacity-0 animate-fade-up stagger-3 border border-outline-variant shadow-sm" style={{ animationFillMode: 'forwards' }}>
-        <div className="flex bg-surface-container-high/30 px-4 pt-3 gap-1">
-          <button
-            type="button"
-            onClick={() => setActiveTab('basic')}
-            className={`px-6 py-3 text-[12px] font-bold tracking-widest rounded-t-lg transition-colors ${activeTab === 'basic' ? 'text-primary border-b-2 border-primary bg-white/50' : 'text-on-surface-variant hover:text-primary'}`}
-          >
-            THÔNG SỐ CƠ BẢN
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab('advanced')}
-            className={`px-6 py-3 text-[12px] font-bold tracking-widest rounded-t-lg transition-colors ${activeTab === 'advanced' ? 'text-primary border-b-2 border-primary bg-white/50' : 'text-on-surface-variant hover:text-primary'}`}
-          >
-            THIẾT LẬP NÂNG CAO
-          </button>
-        </div>
-
         <div className="p-8 flex flex-col gap-6 w-full">
           {/* QUICK PRESETS ROW */}
           <div className="flex flex-col gap-2">
@@ -443,7 +402,7 @@ const TraceViewer: React.FC<TraceViewerProps> = ({
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
             {/* BASIC FIELDS */}
-            <div className={`space-y-2 ${activeTab === 'advanced' ? 'hidden' : ''}`}>
+            <div className="space-y-2">
               <div className="flex justify-between items-end">
                 <label className="text-[13px] font-bold text-industrial-navy uppercase tracking-wider">Ngưỡng Event</label>
                 <span className="text-[11px] font-bold text-on-surface-variant px-1.5 py-0.5 bg-surface-container-high rounded font-mono-data">dB</span>
@@ -452,7 +411,7 @@ const TraceViewer: React.FC<TraceViewerProps> = ({
               <p className="text-[11px] text-on-surface-variant font-medium">Chỉ phân tích các sự kiện có suy hao vượt ngưỡng này.</p>
             </div>
 
-            <div className={`space-y-2 ${activeTab === 'advanced' ? 'hidden' : ''}`}>
+            <div className="space-y-2">
               <div className="flex justify-between items-end">
                 <label className="text-[13px] font-bold text-industrial-navy uppercase tracking-wider">Ngưỡng Section Loss</label>
                 <span className="text-[11px] font-bold text-on-surface-variant px-1.5 py-0.5 bg-surface-container-high rounded font-mono-data">dB/km</span>
@@ -461,7 +420,7 @@ const TraceViewer: React.FC<TraceViewerProps> = ({
               <p className="text-[11px] text-on-surface-variant font-medium">Cảnh báo đỏ nếu suy hao trung bình vượt ngưỡng thiết lập.</p>
             </div>
 
-            <div className={`space-y-2 ${activeTab === 'advanced' ? 'hidden' : ''}`}>
+            <div className="space-y-2">
               <div className="flex justify-between items-end">
                 <label className="text-[13px] font-bold text-industrial-navy uppercase tracking-wider">Thời gian đo (Duration)</label>
                 <span className="text-[11px] font-bold text-on-surface-variant px-1.5 py-0.5 bg-surface-container-high rounded font-mono-data">Giây</span>
@@ -470,7 +429,7 @@ const TraceViewer: React.FC<TraceViewerProps> = ({
               <p className="text-[11px] text-on-surface-variant font-medium">Đánh dấu không đạt (Fail) nếu thời gian đo thực tế thấp hơn.</p>
             </div>
 
-            <div className={`space-y-2 ${activeTab === 'advanced' ? 'hidden' : ''}`}>
+            <div className="space-y-2">
               <div className="flex justify-between items-end">
                 <label className="text-[13px] font-bold text-industrial-navy uppercase tracking-wider">Dung sai gom cụm</label>
                 <span className="text-[11px] font-bold text-on-surface-variant px-1.5 py-0.5 bg-surface-container-high rounded font-mono-data">Mét</span>
@@ -479,7 +438,7 @@ const TraceViewer: React.FC<TraceViewerProps> = ({
               <p className="text-[11px] text-on-surface-variant font-medium">Khoảng cách tối đa để gộp các điểm suy hao gần nhau.</p>
             </div>
 
-            <div className={`space-y-2 ${activeTab === 'advanced' ? 'hidden' : ''}`}>
+            <div className="space-y-2">
               <div className="flex justify-between items-end">
                 <label className="text-[13px] font-bold text-industrial-navy uppercase tracking-wider">Chiều dài tuyến chuẩn</label>
                 <span className="text-[11px] font-bold text-on-surface-variant px-1.5 py-0.5 bg-surface-container-high rounded font-mono-data">km</span>
@@ -488,7 +447,7 @@ const TraceViewer: React.FC<TraceViewerProps> = ({
               <p className="text-[11px] text-on-surface-variant font-medium">Nhập chiều dài thiết kế để đối chiếu kiểm thử.</p>
             </div>
 
-            <div className={`space-y-2 ${activeTab === 'advanced' ? 'hidden' : ''}`}>
+            <div className="space-y-2">
               <div className="flex justify-between items-end">
                 <label className="text-[13px] font-bold text-industrial-navy uppercase tracking-wider">Sai số đủ tuyến</label>
                 <span className="text-[11px] font-bold text-on-surface-variant px-1.5 py-0.5 bg-surface-container-high rounded font-mono-data">km</span>
@@ -497,7 +456,7 @@ const TraceViewer: React.FC<TraceViewerProps> = ({
               <p className="text-[11px] text-on-surface-variant font-medium">Dung sai độ lệch chiều dài cho phép.</p>
             </div>
 
-            <div className={`space-y-2 ${activeTab === 'advanced' ? 'hidden' : ''}`}>
+            <div className="space-y-2">
               <label className="text-[13px] font-bold text-industrial-navy uppercase tracking-wider">Kiểu file đầu ra</label>
               <select value={outputMode} onChange={(e) => setOutputMode(e.target.value)} className="w-full bg-white border border-outline-variant rounded-lg px-4 py-3 font-body-sm text-on-surface focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all outline-none">
                 <option value="fastreporter">FastReporter OTDR Cable (Chuẩn FPT)</option>
@@ -506,8 +465,8 @@ const TraceViewer: React.FC<TraceViewerProps> = ({
               <p className="text-[11px] text-on-surface-variant font-medium">Chọn mẫu định dạng file xuất ra.</p>
             </div>
 
-            {/* Core inputs: always visible but let's hide in advanced tab for layout simplicity or keep visible if needed. The original HTML had them always visible. */}
-            <div className={`space-y-2 ${activeTab === 'advanced' ? 'hidden' : ''}`}>
+            {/* Core inputs are shared by both basic and advanced modes. */}
+            <div className="space-y-2">
               <div className="border border-outline-variant rounded-xl overflow-hidden">
                 <div className="px-4 py-2.5 bg-surface-container-high border-b border-outline-variant">
                   <span className="text-[11px] font-bold text-industrial-navy uppercase tracking-widest">Thông số Core</span>
@@ -530,7 +489,14 @@ const TraceViewer: React.FC<TraceViewerProps> = ({
             {/* ADVANCED FIELDS */}
             <div className={`space-y-2 ${activeTab === 'basic' ? 'hidden' : ''}`}>
               <label className="text-[13px] font-bold text-industrial-navy uppercase tracking-wider">Xuất section theo</label>
-              <select value={sectionExportScope} onChange={(e) => setSectionExportScope(e.target.value)} className="w-full bg-white border border-outline-variant rounded-lg px-4 py-3 font-body-sm text-on-surface focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all outline-none">
+              <select value={sectionExportScope} onChange={(e) => {
+                const nextScope = e.target.value;
+                setSectionExportScope(nextScope);
+                if (nextScope !== 'selected_range') {
+                  setSegmentStart('');
+                  setSegmentEnd('');
+                }
+              }} className="w-full bg-white border border-outline-variant rounded-lg px-4 py-3 font-body-sm text-on-surface focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all outline-none">
                 <option value="all">Toàn bộ tuyến đo được</option>
                 <option value="selected_range">Chỉ đoạn đã chọn (Từ mốc bắt đầu -{'>'} kết thúc)</option>
               </select>
@@ -629,33 +595,6 @@ const TraceViewer: React.FC<TraceViewerProps> = ({
               <p className="text-[11px] text-on-surface-variant font-medium">Công thức toán học ước lượng suy hao riêng đoạn.</p>
             </div>
 
-            <div className={`space-y-2 ${activeTab === 'basic' ? 'hidden' : ''}`}>
-              <div className="flex justify-between items-end">
-                <label className="text-[13px] font-bold text-industrial-navy uppercase tracking-wider">Ngưỡng ORL đạt</label>
-                <span className="text-[11px] font-bold text-on-surface-variant px-1.5 py-0.5 bg-surface-container-high rounded font-mono-data">dB</span>
-              </div>
-              <input value={orlPassThreshold} onChange={(e) => setOrlPassThreshold(e.target.value)} className="w-full bg-white border border-outline-variant rounded-lg px-4 py-3 font-mono-data text-lg text-industrial-navy focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all outline-none" step="0.1" type="number" />
-              <p className="text-[11px] text-on-surface-variant font-medium">Giá trị tối thiểu để kết luận ORL đạt chuẩn.</p>
-            </div>
-
-            <div className={`space-y-2 ${activeTab === 'basic' ? 'hidden' : ''}`}>
-              <label className="text-[13px] font-bold text-industrial-navy uppercase tracking-wider">Nguồn ORL</label>
-              <select value={orlSourceMode} onChange={(e) => setOrlSourceMode(e.target.value)} className="w-full bg-white border border-outline-variant rounded-lg px-4 py-3 font-body-sm text-on-surface focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all outline-none">
-                <option value="auto">Tự động (Ưu tiên ORL đo thật)</option>
-                <option value="trace">Lấy từ đồ thị quang</option>
-              </select>
-              <p className="text-[11px] text-on-surface-variant font-medium">Lựa chọn nguồn dữ liệu ORL gốc để phân tích.</p>
-            </div>
-
-            <div className={`space-y-2 ${activeTab === 'basic' ? 'hidden' : ''}`}>
-              <label className="text-[13px] font-bold text-industrial-navy uppercase tracking-wider">Khi thiếu ORL đo thật</label>
-              <select value={orlMissingPolicy} onChange={(e) => setOrlMissingPolicy(e.target.value)} className="w-full bg-white border border-outline-variant rounded-lg px-4 py-3 font-body-sm text-on-surface focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all outline-none">
-                <option value="blank">Để trống</option>
-                <option value="reference">Hiện giá trị tham khảo nếu có</option>
-                <option value="trace_check">Tự kiểm tra điều kiện ORL từ trace</option>
-              </select>
-              <p className="text-[11px] text-on-surface-variant font-medium">Phương án giải quyết khi file đo gốc bị thiếu ORL.</p>
-            </div>
           </div>
         </div>
       </section>

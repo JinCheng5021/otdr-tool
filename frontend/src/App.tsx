@@ -17,6 +17,8 @@ interface SessionStats {
   recognitionErrors: number;
 }
 
+type ParameterMode = 'basic' | 'advanced';
+
 const EMPTY_SESSION_STATS: SessionStats = {
   loadedTraces: 0,
   recognitionErrors: 0,
@@ -27,6 +29,8 @@ const formatSessionCount = (value: number): string =>
 
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'current' | 'traceviewer'>('traceviewer');
+  const [parameterMode, setParameterMode] = useState<ParameterMode>('basic');
+  const [systemOptionsOpen, setSystemOptionsOpen] = useState(false);
   const [inputBatch, setInputBatch] = useState<InputBatch>({
     files: [],
     revision: 0,
@@ -135,10 +139,56 @@ const App: React.FC = () => {
                 <span className="material-symbols-outlined text-[20px]">history</span>
                 <span className="text-sm">Lịch sử xuất file</span>
               </button>
-              <button className="flex items-center gap-3 px-3 py-2 text-left rounded-lg text-on-surface-variant hover:bg-surface-variant transition-colors font-medium">
-                <span className="material-symbols-outlined text-[20px]">settings</span>
-                <span className="text-sm">Tùy chọn hệ thống</span>
-              </button>
+              <div className="flex flex-col">
+                <button
+                  type="button"
+                  onClick={() => setSystemOptionsOpen((isOpen) => !isOpen)}
+                  aria-expanded={systemOptionsOpen}
+                  aria-controls="system-options-menu"
+                  className="flex items-center gap-3 px-3 py-2 text-left rounded-lg text-on-surface-variant hover:bg-surface-variant transition-colors font-medium"
+                >
+                  <span className="material-symbols-outlined text-[20px]" aria-hidden="true">settings</span>
+                  <span className="text-sm flex-1">Tùy chọn hệ thống</span>
+                  <span
+                    className="material-symbols-outlined text-[18px] transition-transform"
+                    aria-hidden="true"
+                    style={{ transform: systemOptionsOpen ? 'rotate(180deg)' : 'rotate(0deg)' }}
+                  >
+                    expand_more
+                  </span>
+                </button>
+                {systemOptionsOpen && (
+                  <div
+                    id="system-options-menu"
+                    className="mt-1 ml-4 pl-3 border-l border-outline-variant flex flex-col gap-1"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => setParameterMode('basic')}
+                      aria-pressed={parameterMode === 'basic'}
+                      className={
+                        parameterMode === 'basic'
+                          ? 'px-3 py-2 text-left rounded-lg text-xs font-bold text-primary bg-primary-fixed/50 border border-primary/10'
+                          : 'px-3 py-2 text-left rounded-lg text-xs font-medium text-on-surface-variant hover:bg-surface-variant'
+                      }
+                    >
+                      Thông số cơ bản
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setParameterMode('advanced')}
+                      aria-pressed={parameterMode === 'advanced'}
+                      className={
+                        parameterMode === 'advanced'
+                          ? 'px-3 py-2 text-left rounded-lg text-xs font-bold text-primary bg-primary-fixed/50 border border-primary/10'
+                          : 'px-3 py-2 text-left rounded-lg text-xs font-medium text-on-surface-variant hover:bg-surface-variant'
+                      }
+                    >
+                      Thông số nâng cao
+                    </button>
+                  </div>
+                )}
+              </div>
             </nav>
           </div>
           
@@ -185,6 +235,8 @@ const App: React.FC = () => {
             files={inputBatch.files}
             replaceInputFiles={replaceInputFiles}
             clearInputFiles={clearInputFiles}
+            parameterMode={parameterMode}
+            onParameterModeChange={setParameterMode}
           />
         </div>
       </main>

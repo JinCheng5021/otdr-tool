@@ -29,7 +29,7 @@ const Modals: React.FC<ModalsProps> = ({ isExportModalOpen, setIsExportModalOpen
   const fetchHistory = async () => {
     setHistoryLoading(true);
     try {
-      const res = await fetch('http://localhost:8000/trace/api/history');
+      const res = await fetch('/trace/api/history');
       if (res.ok) {
         const json = await res.json();
         setHistoryData(json.data || []);
