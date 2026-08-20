@@ -1,9 +1,21 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useCallback, useState, useEffect, useRef } from 'react';
 
 const NotificationDropdown: React.FC = () => {
   const [isOpen, setIsOpen] = useState(false);
   const [notifications, setNotifications] = useState<any[]>([]);
   const dropdownRef = useRef<HTMLDivElement>(null);
+
+  const fetchNotifications = useCallback(async () => {
+    try {
+      const res = await fetch('/trace/api/notifications');
+      if (res.ok) {
+        const json = await res.json();
+        setNotifications(Array.isArray(json.data) ? json.data : []);
+      }
+    } catch (e) {
+      console.error('Failed to fetch notifications', e);
+    }
+  }, []);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -16,22 +28,14 @@ const NotificationDropdown: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    if (isOpen) {
-      fetchNotifications();
-    }
-  }, [isOpen]);
+    void fetchNotifications();
+  }, [fetchNotifications]);
 
-  const fetchNotifications = async () => {
-    try {
-      const res = await fetch('/trace/api/notifications');
-      if (res.ok) {
-        const json = await res.json();
-        setNotifications(json.data || []);
-      }
-    } catch (e) {
-      console.error('Failed to fetch notifications', e);
+  useEffect(() => {
+    if (isOpen) {
+      void fetchNotifications();
     }
-  };
+  }, [fetchNotifications, isOpen]);
 
   return (
     <div className="relative" ref={dropdownRef}>
@@ -41,9 +45,14 @@ const NotificationDropdown: React.FC = () => {
         className="w-10 h-10 rounded-full flex items-center justify-center text-on-surface hover:bg-surface-variant transition-colors relative border-2 border-industrial-navy"
       >
         <span className="material-symbols-outlined text-[20px]">notifications</span>
-        <span className="absolute -top-1 -right-1 bg-red-500 text-white text-[9px] font-bold rounded-full w-4 h-4 flex items-center justify-center">
-          {notifications.length > 0 ? notifications.length : '1'}
-        </span>
+        {notifications.length > 0 && (
+          <span
+            data-testid="notification-badge"
+            className="absolute -top-1 -right-1 bg-red-500 text-white text-[9px] font-bold rounded-full w-4 h-4 flex items-center justify-center"
+          >
+            {notifications.length}
+          </span>
+        )}
       </button>
 
       {isOpen && (

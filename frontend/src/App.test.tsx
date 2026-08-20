@@ -324,3 +324,31 @@ test('loads history and notifications through deploy-safe trace endpoints', asyn
     expect.stringContaining('localhost:8000'),
   );
 });
+
+test('hides the notification badge when there are no notifications', async () => {
+  render(<App />);
+
+  await waitFor(() => {
+    expect(global.fetch).toHaveBeenCalledWith('/trace/api/notifications');
+  });
+  expect(screen.queryByTestId('notification-badge')).not.toBeInTheDocument();
+});
+
+test('shows the exact notification count returned by the API', async () => {
+  (global.fetch as jest.Mock).mockImplementation(async (url: string) => ({
+    ok: true,
+    json: async () => ({
+      status: 'success',
+      data: url === '/trace/api/notifications'
+        ? [
+            { id: 1, message: 'Thông báo 1', export_time: '08:00' },
+            { id: 2, message: 'Thông báo 2', export_time: '08:01' },
+          ]
+        : [],
+    }),
+  }));
+
+  render(<App />);
+
+  expect(await screen.findByTestId('notification-badge')).toHaveTextContent('2');
+});
