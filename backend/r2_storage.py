@@ -280,16 +280,19 @@ class PrivateBlobStorage:
         *,
         content_type: str,
         overwrite: bool = False,
+        content_disposition: str | None = None,
     ) -> StoredBlob:
         self._validate_managed_path(pathname)
         if not isinstance(content, bytes):
             raise BlobStorageError("Blob content must be bytes")
+        disposition = self._content_disposition(pathname, content_disposition)
         if len(content) > MULTIPART_UPLOAD_THRESHOLD_BYTES:
             return self._upload_bytes_multipart(
                 pathname,
                 content,
                 content_type=content_type,
                 overwrite=overwrite,
+                content_disposition=disposition,
             )
         params: dict[str, Any] = {
             "Bucket": self._bucket,
@@ -297,9 +300,7 @@ class PrivateBlobStorage:
             "Body": content,
             "ContentLength": len(content),
             "ContentType": content_type,
-            "ContentDisposition": (
-                f'attachment; filename="{PurePosixPath(pathname).name}"'
-            ),
+            "ContentDisposition": disposition,
         }
         if not overwrite:
             params["IfNoneMatch"] = "*"
@@ -323,6 +324,7 @@ class PrivateBlobStorage:
         *,
         content_type: str,
         overwrite: bool,
+        content_disposition: str,
     ) -> StoredBlob:
         multipart_upload_id: str | None = None
         completed = False
@@ -332,6 +334,7 @@ class PrivateBlobStorage:
                 content_type=content_type,
                 expected_size=len(content),
                 overwrite=overwrite,
+                content_disposition=content_disposition,
             )
             completed_parts: list[dict[str, Any]] = []
             for part_number, start in enumerate(
@@ -498,9 +501,11 @@ class PrivateBlobStorage:
         content_type: str,
         expected_size: int,
         overwrite: bool = False,
+        content_disposition: str | None = None,
     ) -> str:
         self._validate_managed_path(pathname)
         self._validate_presign_limits(expected_size, 1)
+        disposition = self._content_disposition(pathname, content_disposition)
         try:
             if not overwrite:
                 try:
@@ -516,9 +521,7 @@ class PrivateBlobStorage:
                 Bucket=self._bucket,
                 Key=pathname,
                 ContentType=content_type,
-                ContentDisposition=(
-                    f'attachment; filename="{PurePosixPath(pathname).name}"'
-                ),
+                ContentDisposition=disposition,
                 Metadata={"expected-size": str(expected_size)},
             )
         except BlobStorageOperationError:
@@ -635,6 +638,26 @@ class PrivateBlobStorage:
 
     def _object_uri(self, pathname: str) -> str:
         return f"r2://{self._bucket}/{pathname}"
+
+    @staticmethod
+    def _content_disposition(
+        pathname: str,
+        content_disposition: str | None,
+    ) -> str:
+        if content_disposition is None:
+            return f'attachment; filename="{PurePosixPath(pathname).name}"'
+        if (
+            not isinstance(content_disposition, str)
+            or not content_disposition
+            or '\r' in content_disposition
+            or '\n' in content_disposition
+        ):
+            raise BlobStorageError("invalid content disposition")
+        try:
+            content_disposition.encode("ascii")
+        except UnicodeEncodeError as exc:
+            raise BlobStorageError("content disposition must be ASCII") from exc
+        return content_disposition
 
     @staticmethod
     def _is_not_found(exc: ClientError) -> bool:

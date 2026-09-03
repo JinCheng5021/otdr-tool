@@ -5,6 +5,7 @@ import json
 import inspect
 import os
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 from fastapi.responses import Response
@@ -93,8 +94,15 @@ class FakeBlobStorage:
         *,
         content_type: str,
         overwrite: bool,
+        content_disposition: str | None = None,
     ) -> StoredBlob:
-        self.upload_call = (pathname, content, content_type, overwrite)
+        self.upload_call = (
+            pathname,
+            content,
+            content_type,
+            overwrite,
+            content_disposition,
+        )
         return StoredBlob(
             pathname=pathname,
             url="https://private.example/output",
@@ -155,7 +163,7 @@ class ConvertFromBlobTests(unittest.IsolatedAsyncioTestCase):
         expected_build_options = {
             key: value
             for key, value in CONVERT_OPTIONS.items()
-            if key not in {"exporter_name", "unit", "route_name"}
+            if key not in {"exporter_name", "unit"}
         }
         self.assertEqual(captured, expected_build_options)
         history_mock.assert_called_once_with("Tester", "QA", "Route 01")
@@ -163,11 +171,21 @@ class ConvertFromBlobTests(unittest.IsolatedAsyncioTestCase):
         storage = FakeBlobStorage.instances[0]
         self.assertTrue(storage.closed)
         self.assertIsNotNone(storage.upload_call)
-        output_path, content, content_type, overwrite = storage.upload_call
+        (
+            output_path,
+            content,
+            content_type,
+            overwrite,
+            content_disposition,
+        ) = storage.upload_call
         self.assertIn(f"/{UPLOAD_ID}/FastReporter_test.xlsx", output_path)
         self.assertEqual(content, b"XLSX-DATA")
         self.assertEqual(content_type, app_trace.XLSX_CONTENT_TYPE)
         self.assertFalse(overwrite)
+        self.assertEqual(
+            content_disposition,
+            'attachment; filename="FastReporter_test.xlsx"',
+        )
         self.assertEqual(storage.deleted_paths, [INPUT_PATH])
 
         payload = json.loads(response.body)
@@ -501,6 +519,35 @@ class R2SigningEndpointTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ConvertContractTests(unittest.TestCase):
+    def test_route_name_drives_both_workbook_filenames(self) -> None:
+        exported_at = datetime(2026, 8, 12, 18, 30, tzinfo=timezone.utc)
+        for output_mode in ("fastreporter", "stv"):
+            with self.subTest(output_mode=output_mode):
+                self.assertEqual(
+                    app_trace._build_export_filename(
+                        "Tuyến xuất YBI - TQG",
+                        output_mode,
+                        exported_at=exported_at,
+                    ),
+                    "YBI - TQG 13-08.xlsx",
+                )
+
+    def test_unicode_export_filename_round_trips_through_content_disposition(self) -> None:
+        filename = "Tuyến Yên Bái - TQG 13-08.xlsx"
+        response = Response(
+            content=b"XLSX",
+            headers={
+                "Content-Disposition": app_trace._attachment_content_disposition(
+                    filename
+                )
+            },
+        )
+
+        self.assertEqual(
+            app_trace._filename_from_export_response(response),
+            filename,
+        )
+
     def test_normal_scope_discards_stale_range_values(self) -> None:
         options = {
             **CONVERT_OPTIONS,
@@ -511,7 +558,7 @@ class ConvertContractTests(unittest.TestCase):
         build_options = {
             key: value
             for key, value in options.items()
-            if key not in {"exporter_name", "unit", "route_name"}
+            if key not in {"exporter_name", "unit"}
         }
 
         with patch.object(

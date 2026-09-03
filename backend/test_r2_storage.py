@@ -209,9 +209,31 @@ class PrivateBlobStorageTests(unittest.TestCase):
             IfNoneMatch="*",
         )
 
+    def test_upload_preserves_explicit_download_filename(self) -> None:
+        output_path = f"otdr/output/2026/07/22/{UPLOAD_ID}/safe-name.xlsx"
+        disposition = (
+            'attachment; filename="Tuyen Yen Bai 13-08.xlsx"; '
+            "filename*=UTF-8''Tuy%E1%BA%BFn%20Y%C3%AAn%20B%C3%A1i%2013-08.xlsx"
+        )
+        client = Mock()
+        storage = storage_with_client(client)
+
+        storage.upload_bytes(
+            output_path,
+            b"XLSX",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            content_disposition=disposition,
+        )
+
+        self.assertEqual(
+            client.put_object.call_args.kwargs["ContentDisposition"],
+            disposition,
+        )
+
     def test_large_output_uses_managed_multipart_upload(self) -> None:
         output_path = f"otdr/output/2026/07/22/{UPLOAD_ID}/report.xlsx"
         content = b"0123456789"
+        disposition = 'attachment; filename="Route 13-08.xlsx"'
         client = Mock()
         client.head_object.side_effect = [
             client_error("NoSuchKey", 404, "HeadObject"),
@@ -239,11 +261,16 @@ class PrivateBlobStorageTests(unittest.TestCase):
                     "application/vnd.openxmlformats-officedocument."
                     "spreadsheetml.sheet"
                 ),
+                content_disposition=disposition,
             )
 
         self.assertEqual(stored.size, len(content))
         self.assertEqual(client.upload_part.call_count, 3)
         client.complete_multipart_upload.assert_called_once()
+        self.assertEqual(
+            client.create_multipart_upload.call_args.kwargs["ContentDisposition"],
+            disposition,
+        )
         client.put_object.assert_not_called()
         client.abort_multipart_upload.assert_not_called()
 

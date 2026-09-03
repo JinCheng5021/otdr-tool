@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import base64
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 import io
 import json
 import time
 import os
+import re
+import unicodedata
+from urllib.parse import quote, unquote
 from uuid import UUID, uuid4
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -57,6 +60,13 @@ app.add_middleware(
 ALLOWED_EXTENSIONS = ['.msor', '.sor', '.trc']
 INPUT_EXTENSION_PRIORITY = ('.sor', '.msor', '.trc')
 XLSX_CONTENT_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+VIETNAM_TIMEZONE = timezone(timedelta(hours=7), name='Asia/Ho_Chi_Minh')
+_INVALID_EXPORT_FILENAME_CHARS = re.compile(r'[<>:\x22/\\|?*\x00-\x1f]')
+_ROUTE_FIELD_PREFIX = re.compile(
+    r'^tuy\u1ebfn\s+xu\u1ea5t(?:\s*[:\-\u2013\u2014]\s*|\s+)',
+    flags=re.IGNORECASE,
+)
+_MAX_EXPORT_ROUTE_FILENAME_CHARS = 120
 HTML_PAGE = """<!DOCTYPE html>
 
 <html class="light" lang="en"><head>
@@ -1522,6 +1532,50 @@ def _record_export_history(
         print(f"Warning: Could not record export history in Supabase. {exc}")
 
 
+def _build_export_filename(
+    route_name: str,
+    output_mode: str,
+    *,
+    exported_at: datetime | None = None,
+) -> str:
+    moment = exported_at or datetime.now(VIETNAM_TIMEZONE)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=VIETNAM_TIMEZONE)
+    else:
+        moment = moment.astimezone(VIETNAM_TIMEZONE)
+    normalized_route = ' '.join(str(route_name or '').split())
+    normalized_route = _ROUTE_FIELD_PREFIX.sub('', normalized_route, count=1)
+    normalized_route = _INVALID_EXPORT_FILENAME_CHARS.sub('-', normalized_route)
+    normalized_route = re.sub(r'\s+', ' ', normalized_route).strip(' .-')
+    normalized_route = normalized_route[:_MAX_EXPORT_ROUTE_FILENAME_CHARS].rstrip(
+        ' .-'
+    )
+    if normalized_route:
+        return f'{normalized_route} {moment:%d-%m}.xlsx'
+
+    # Preserve the previous fallback for API callers that omit a route name.
+    prefix = 'Bang_su_kien' if str(output_mode).lower() == 'stv' else 'FastReporter'
+    return f'{prefix}_{moment:%Y%m%d_%H%M%S}.xlsx'
+
+
+def _attachment_content_disposition(filename: str) -> str:
+    ascii_source = filename.replace('\u0110', 'D').replace('\u0111', 'd')
+    ascii_fallback = (
+        unicodedata.normalize('NFKD', ascii_source)
+        .encode('ascii', 'ignore')
+        .decode('ascii')
+    )
+    ascii_fallback = _INVALID_EXPORT_FILENAME_CHARS.sub('-', ascii_fallback)
+    ascii_fallback = re.sub(r'\s+', ' ', ascii_fallback).strip(' .')
+    if not ascii_fallback.lower().endswith('.xlsx'):
+        ascii_fallback = 'report.xlsx'
+    encoded_filename = quote(filename, safe='')
+    return (
+        f'attachment; filename*=UTF-8{chr(39) * 2}{encoded_filename}; '
+        f'filename={chr(34)}{ascii_fallback}{chr(34)}'
+    )
+
+
 def _build_export_response(
     payload: Iterable[tuple[str, bytes]],
     *,
@@ -1545,6 +1599,7 @@ def _build_export_response(
     section_match_tolerance_m: float,
     section_measurement_mode: str,
     output_mode: str,
+    route_name: str,
     stv_total_core: str,
     stv_used_core: str,
 ) -> Response:
@@ -1622,10 +1677,8 @@ def _build_export_response(
         stv_total_core=stv_total_core_value,
         stv_used_core=stv_used_core_value,
     )
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    prefix = 'Bang_su_kien' if str(output_mode).lower() == 'stv' else 'FastReporter'
-    filename = f'{prefix}_{timestamp}.xlsx'
-    headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
+    filename = _build_export_filename(route_name, output_mode)
+    headers = {'Content-Disposition': _attachment_content_disposition(filename)}
     return Response(
         content=workbook.getvalue(),
         media_type=XLSX_CONTENT_TYPE,
@@ -1705,6 +1758,7 @@ async def convert(
         section_match_tolerance_m=section_match_tolerance_m,
         section_measurement_mode=section_measurement_mode,
         output_mode=output_mode,
+        route_name=route_name,
         stv_total_core=stv_total_core,
         stv_used_core=stv_used_core,
     )
@@ -1714,12 +1768,38 @@ async def convert(
 
 def _filename_from_export_response(response: Response) -> str:
     disposition = response.headers.get('content-disposition', '')
-    marker = 'filename='
-    if marker not in disposition:
+    parameters: dict[str, str] = {}
+    for part in disposition.split(';')[1:]:
+        name, separator, value = part.strip().partition('=')
+        if separator:
+            parameters[name.lower()] = value.strip().strip('"')
+
+    raw_filename = ''
+    encoded_filename = parameters.get('filename*', '')
+    if encoded_filename:
+        charset, separator, encoded_value = encoded_filename.partition("''")
+        if separator and charset.lower() == 'utf-8':
+            try:
+                raw_filename = unquote(
+                    encoded_value,
+                    encoding='utf-8',
+                    errors='strict',
+                )
+            except (UnicodeDecodeError, ValueError):
+                raw_filename = ''
+    if not raw_filename:
+        raw_filename = parameters.get('filename', '')
+    if not raw_filename:
         raise BlobStorageError('converter response is missing an output filename')
-    raw_filename = disposition.split(marker, 1)[1].split(';', 1)[0].strip().strip('"')
-    filename = os.path.basename(raw_filename)
-    if not filename or filename != raw_filename or not filename.lower().endswith('.xlsx'):
+    filename = raw_filename.strip()
+    if (
+        not filename
+        or filename != raw_filename
+        or '/' in filename
+        or '\\' in filename
+        or _INVALID_EXPORT_FILENAME_CHARS.search(filename)
+        or not filename.lower().endswith('.xlsx')
+    ):
         raise BlobStorageError('converter returned an invalid output filename')
     return filename
 
@@ -2194,6 +2274,7 @@ async def convert_from_blob(
                 section_match_tolerance_m=section_match_tolerance_m,
                 section_measurement_mode=section_measurement_mode,
                 output_mode=output_mode,
+                route_name=route_name,
                 stv_total_core=stv_total_core,
                 stv_used_core=stv_used_core,
             )
@@ -2206,6 +2287,9 @@ async def convert_from_blob(
                 output_bytes,
                 content_type=XLSX_CONTENT_TYPE,
                 overwrite=False,
+                content_disposition=export_response.headers.get(
+                    'content-disposition'
+                ),
             )
             verified = storage.metadata(stored.pathname)
             if verified.size != len(output_bytes):
