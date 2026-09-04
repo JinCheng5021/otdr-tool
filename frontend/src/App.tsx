@@ -139,6 +139,14 @@ const App: React.FC = () => {
                 <span className="material-symbols-outlined text-[20px]">history</span>
                 <span className="text-sm">Lịch sử xuất file</span>
               </button>
+              <button
+                type="button"
+                onClick={() => window.dispatchEvent(new Event('open-status-chart-modal'))}
+                className="flex items-center gap-3 px-3 py-2 text-left rounded-lg text-on-surface-variant hover:bg-surface-variant transition-colors font-medium"
+              >
+                <span className="material-symbols-outlined text-[20px]" aria-hidden="true">monitoring</span>
+                <span className="text-sm">Biểu đồ</span>
+              </button>
               <div className="flex flex-col">
                 <button
                   type="button"
@@ -263,6 +271,14 @@ const App: React.FC = () => {
         >
           <span className="material-symbols-outlined text-[24px]">history</span>
           <span className="text-[10px] font-bold uppercase mt-1">Lịch sử</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => window.dispatchEvent(new Event('open-status-chart-modal'))}
+          className="flex flex-col items-center justify-center px-4 text-on-surface-variant opacity-50"
+        >
+          <span className="material-symbols-outlined text-[24px]" aria-hidden="true">monitoring</span>
+          <span className="text-[10px] font-bold uppercase mt-1">Biểu đồ</span>
         </button>
       </nav>
       {/* Mobile Nav Spacing */}
