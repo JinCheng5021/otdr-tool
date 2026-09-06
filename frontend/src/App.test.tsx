@@ -325,36 +325,32 @@ test('loads history and notifications through deploy-safe trace endpoints', asyn
   );
 });
 
-test('opens the status chart below history and summarizes real history records', async () => {
-  const historyRecords = [
-    {
-      id: 1,
-      exporter_name: 'Nguyễn Văn A',
-      unit: 'QA',
-      route_name: 'YBI - TQG',
-      export_time: '2026-09-03 08:00:00',
-    },
-    {
-      id: 2,
-      exporter_name: 'Nguyễn Văn B',
-      unit: 'QA',
-      route_name: 'YBI - TQG',
-      export_time: '2026-09-03 09:00:00',
-    },
-    {
-      id: 3,
-      exporter_name: 'Nguyễn Văn C',
-      unit: 'INF',
-      route_name: 'HNI - QNH',
-      export_time: '2026-09-02 10:00:00',
-    },
-  ];
+test('opens the route dashboard and loads the selected region and route', async () => {
   (global.fetch as jest.Mock).mockImplementation(async (url: string) => ({
     ok: true,
     status: 200,
     json: async () => ({
       status: 'success',
-      data: url === '/trace/api/history' ? historyRecords : [],
+      data: url.startsWith('/trace/api/dashboard/routes')
+        ? [{ route_key: 'cpa--tyn', route_name: 'TYN - CPA' }]
+        : url.startsWith('/trace/api/dashboard/route?')
+          ? {
+            region: 'B-N',
+            route_key: 'cpa--tyn',
+            route_name: 'TYN - CPA',
+            period_start: '2026-02-01',
+            period_end: '2026-07-01',
+            months: [
+              {
+                month: '2026-07', month_label: 'Tháng 7',
+                worst_event_loss_db: 4.57, worst_event_position_km: 40.09,
+                utilization_percent: 25, dkd_core_percent: 29.17,
+                dkd_required_percent: 70, assessment: 'Không đạt',
+                loss_source: null, qd_source: null,
+              },
+            ],
+          }
+          : [],
     }),
   }));
 
@@ -366,15 +362,21 @@ test('opens the status chart below history and summarizes real history records',
   expect(
     await screen.findByRole('heading', { name: /^Biểu đồ$/i }),
   ).toBeInTheDocument();
-  expect(global.fetch).toHaveBeenCalledWith('/trace/api/history');
-  expect(screen.getByLabelText('Số bản ghi đã tải')).toHaveTextContent('3');
-  expect(screen.getByLabelText('Số tuyến ghi nhận')).toHaveTextContent('2');
+  await waitFor(() => expect(screen.getByLabelText(/Chọn tuyến/i)).toHaveValue('cpa--tyn'));
+  expect(global.fetch).toHaveBeenCalledWith(
+    '/trace/api/dashboard/routes?region=B-N',
+    expect.objectContaining({ signal: expect.anything() }),
+  );
+  expect(await screen.findByText('Tuyến: TYN - CPA')).toBeInTheDocument();
   expect(
-    screen.getByRole('img', { name: /Biểu đồ lượt xuất 7 ngày gần nhất/i }),
+    screen.getByRole('img', { name: /Biểu đồ điểm lỗi nặng theo tháng/i }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole('img', { name: /Biểu đồ đánh giá tuyến theo QĐ 4.8/i }),
   ).toBeInTheDocument();
 });
 
-test('does not show estimated status figures when history cannot be loaded', async () => {
+test('does not show estimated route figures when dashboard data cannot be loaded', async () => {
   (global.fetch as jest.Mock).mockResolvedValue({
     ok: false,
     status: 503,
@@ -387,9 +389,8 @@ test('does not show estimated status figures when history cannot be loaded', asy
   );
 
   expect(
-    await screen.findByText('Không thể tải dữ liệu lịch sử. Vui lòng thử lại.'),
+    await screen.findByText('Không thể tải danh sách tuyến. Vui lòng thử lại.'),
   ).toBeInTheDocument();
-  expect(screen.queryByLabelText('Số bản ghi đã tải')).not.toBeInTheDocument();
   expect(screen.getByText(/không hiển thị số liệu ước đoán/i)).toBeInTheDocument();
 });
 

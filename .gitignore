@@ -45,3 +45,6 @@ hex_dump.py
 .vercel
 .env*
 !.env.example
+
+# Local analysis data generated from operational KQĐ workbooks
+.codex_tmp/

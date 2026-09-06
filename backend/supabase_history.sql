@@ -42,3 +42,33 @@ from public.export_history;
 
 revoke all on public.export_notifications from anon, authenticated;
 grant select on public.export_notifications to service_role;
+
+create table if not exists public.route_dashboard_snapshots (
+    id bigint generated always as identity primary key,
+    region text not null check (region in ('B-N', 'TBB', 'DBB')),
+    route_key text not null,
+    route_name text not null,
+    measurement_month date not null,
+    worst_event_loss_db double precision,
+    worst_event_position_km double precision,
+    utilization_percent double precision,
+    dkd_core_percent double precision,
+    dkd_required_percent double precision,
+    assessment text check (assessment is null or assessment in ('Đạt', 'Không đạt')),
+    source_file text not null,
+    source_sheet text not null,
+    source_format text not null default 'unknown',
+    source_sha256 text not null,
+    warnings jsonb not null default '[]'::jsonb,
+    imported_at timestamptz not null default now(),
+    unique (region, route_key, measurement_month, source_sha256, source_sheet)
+);
+
+create index if not exists route_dashboard_region_route_month_idx
+    on public.route_dashboard_snapshots (region, route_key, measurement_month desc);
+
+alter table public.route_dashboard_snapshots enable row level security;
+
+revoke all on public.route_dashboard_snapshots from anon, authenticated;
+grant select, insert, update on public.route_dashboard_snapshots to service_role;
+grant usage, select on sequence public.route_dashboard_snapshots_id_seq to service_role;

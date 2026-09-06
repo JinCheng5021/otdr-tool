@@ -19,6 +19,13 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Iterable, List
 
+from .dashboard_storage import (
+    DashboardRouteNotFoundError,
+    DashboardStorageConfigurationError,
+    DashboardStorageError,
+    get_dashboard_storage,
+)
+
 from .history_storage import (
     HistoryStorageConfigurationError,
     HistoryStorageError,
@@ -2341,6 +2348,75 @@ def get_history() -> JSONResponse:
             content={
                 "status": "error",
                 "detail": "Could not retrieve export history from Supabase.",
+            },
+        )
+
+
+@app.get('/api/dashboard/routes')
+def get_dashboard_routes(region: str) -> JSONResponse:
+    try:
+        routes = get_dashboard_storage().list_routes(region)
+        return JSONResponse(content={"status": "success", "data": routes})
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=400,
+            content={"status": "error", "detail": str(exc)},
+        )
+    except DashboardStorageConfigurationError as exc:
+        print(f"Dashboard storage configuration error: {exc}")
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "error",
+                "detail": "Dashboard storage is not configured.",
+            },
+        )
+    except DashboardStorageError as exc:
+        print(f"Dashboard route-list read error: {exc}")
+        return JSONResponse(
+            status_code=502,
+            content={
+                "status": "error",
+                "detail": "Could not retrieve dashboard routes.",
+            },
+        )
+
+
+@app.get('/api/dashboard/route')
+def get_dashboard_route(
+    region: str,
+    route_key: str,
+    months: int = 6,
+) -> JSONResponse:
+    try:
+        series = get_dashboard_storage().route_series(region, route_key, months)
+        return JSONResponse(content={"status": "success", "data": series})
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=400,
+            content={"status": "error", "detail": str(exc)},
+        )
+    except DashboardRouteNotFoundError:
+        return JSONResponse(
+            status_code=404,
+            content={"status": "error", "detail": "Dashboard route was not found."},
+        )
+    except DashboardStorageConfigurationError as exc:
+        print(f"Dashboard storage configuration error: {exc}")
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "error",
+                "detail": "Dashboard storage is not configured.",
+            },
+        )
+    except DashboardStorageError as exc:
+        print(f"Dashboard route read error: {exc}")
+        return JSONResponse(
+            status_code=502,
+            content={
+                "status": "error",
+                "detail": "Could not retrieve dashboard route data.",
             },
         )
 
