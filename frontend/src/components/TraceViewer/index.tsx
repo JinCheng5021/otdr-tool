@@ -305,11 +305,6 @@ const TraceViewer: React.FC<TraceViewerProps> = ({
 
   return (
     <div className="flex-1 flex flex-col min-w-0 p-margin-mobile md:p-8 gap-8 pb-24">
-      <section className="opacity-0 animate-fade-up" style={{ animationFillMode: 'forwards' }}>
-        <h1 className="font-headline-xl text-[28px] md:text-headline-xl text-industrial-navy mb-2 tracking-tight">Cấu hình Xuất Excel Tuyến</h1>
-        <p className="font-body-md text-on-surface-variant max-w-2xl leading-relaxed">Chuẩn hóa dữ liệu đo OTDR sang báo cáo kiểm tra tuyến chuyên nghiệp. Hỗ trợ đầy đủ định dạng .SOR, .MSOR và .TRC.</p>
-      </section>
-
       <section className="opacity-0 animate-fade-up stagger-1" style={{ animationFillMode: 'forwards' }}>
         <div
           className={`group relative w-full h-56 md:h-64 rounded-2xl border-2 border-dashed ${isDragging ? 'border-primary bg-primary/10' : 'border-primary/30 bg-surface-container-lowest'} hover:bg-primary/5 hover:border-primary transition-all flex flex-col items-center justify-center cursor-pointer overflow-hidden`}

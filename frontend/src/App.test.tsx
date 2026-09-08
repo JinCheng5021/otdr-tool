@@ -61,9 +61,14 @@ function openRouteGraph(): void {
 
 test('renders the trace export screen', () => {
   render(<App />);
+  expect(screen.getByRole('img', { name: /^FPT$/i })).toBeInTheDocument();
+  expect(screen.getByText(/^PMB - TraceViewer$/i)).toBeInTheDocument();
   expect(
-    screen.getByRole('heading', { name: /Cấu hình Xuất Excel Tuyến/i }),
-  ).toBeInTheDocument();
+    screen.queryByRole('heading', { name: /Cấu hình Xuất Excel Tuyến/i }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByText(/Chuẩn hóa dữ liệu đo OTDR sang báo cáo kiểm tra tuyến chuyên nghiệp/i),
+  ).not.toBeInTheDocument();
   expect(
     screen.queryByRole('button', { name: /Nạp Trace Mới/i }),
   ).not.toBeInTheDocument();

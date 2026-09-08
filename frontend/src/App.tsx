@@ -96,10 +96,12 @@ const App: React.FC = () => {
       {/* TopAppBar */}
       <header className="bg-surface/80 backdrop-blur-md border-b border-outline-variant z-50 sticky top-0 px-margin-mobile md:px-margin-desktop w-full h-14 flex justify-between items-center">
         <div className="flex items-center gap-2">
-          <div className="w-8 h-8 bg-primary rounded flex items-center justify-center text-on-primary">
-            <span className="material-symbols-outlined text-[20px]">analytics</span>
-          </div>
-          <span className="font-headline-md text-[18px] font-extrabold tracking-tight text-industrial-navy">FPT OTDR PRO</span>
+          <img
+            src={`${process.env.PUBLIC_URL}/fpt-logo.svg`}
+            alt="FPT"
+            className="w-12 h-8 object-contain"
+          />
+          <span className="font-headline-md text-[18px] font-extrabold tracking-tight text-industrial-navy">PMB - TraceViewer</span>
         </div>
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2 text-status-pass bg-status-pass/10 px-3 py-1 rounded-full border border-status-pass/20 animate-pulse-soft">
