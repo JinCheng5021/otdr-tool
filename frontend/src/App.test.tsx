@@ -19,6 +19,7 @@ jest.mock('axios', () => ({
 jest.mock('echarts-for-react', () => () => null);
 
 beforeEach(() => {
+  window.localStorage.clear();
   window.alert = jest.fn();
   jest.spyOn(console, 'error').mockImplementation(() => undefined);
   (axios.post as jest.Mock).mockReset();
@@ -63,6 +64,7 @@ test('renders the trace export screen', () => {
   render(<App />);
   expect(screen.getByRole('img', { name: /^FPT$/i })).toBeInTheDocument();
   expect(screen.getByText(/^PMB - TraceViewer$/i)).toBeInTheDocument();
+  expect(screen.queryByText(/^System Ready$/i)).not.toBeInTheDocument();
   expect(
     screen.queryByRole('heading', { name: /Cấu hình Xuất Excel Tuyến/i }),
   ).not.toBeInTheDocument();
@@ -408,7 +410,7 @@ test('hides the notification badge when there are no notifications', async () =>
   expect(screen.queryByTestId('notification-badge')).not.toBeInTheDocument();
 });
 
-test('shows the exact notification count returned by the API', async () => {
+test('keeps only unread notifications and removes each one after it is read', async () => {
   (global.fetch as jest.Mock).mockImplementation(async (url: string) => ({
     ok: true,
     json: async () => ({
@@ -425,4 +427,48 @@ test('shows the exact notification count returned by the API', async () => {
   render(<App />);
 
   expect(await screen.findByTestId('notification-badge')).toHaveTextContent('2');
+  fireEvent.click(screen.getByRole('button', { name: /^Thông báo$/i }));
+  expect(screen.getByTestId('notification-badge')).toHaveTextContent('2');
+  fireEvent.click(screen.getByRole('button', {
+    name: /Đánh dấu đã đọc: Thông báo 1/i,
+  }));
+  await waitFor(() => {
+    expect(screen.getByTestId('notification-badge')).toHaveTextContent('1');
+  });
+  expect(screen.queryByText('Thông báo 1')).not.toBeInTheDocument();
+  expect(screen.getByText('Thông báo 2')).toBeInTheDocument();
+  expect(window.localStorage.getItem('otdr_read_notification_ids')).toBe('[1]');
+
+  fireEvent.click(screen.getByRole('button', { name: /^Đọc tất cả$/i }));
+  await waitFor(() => {
+    expect(screen.queryByTestId('notification-badge')).not.toBeInTheDocument();
+  });
+  expect(screen.getByText('Không có thông báo chưa đọc.')).toBeInTheDocument();
+  expect(window.localStorage.getItem('otdr_last_read_id')).toBe('2');
+});
+
+test('restores read state and counts only notifications not previously read', async () => {
+  window.localStorage.setItem('otdr_last_read_id', '1');
+  window.localStorage.setItem('otdr_read_notification_ids', '[2]');
+  (global.fetch as jest.Mock).mockImplementation(async (url: string) => ({
+    ok: true,
+    json: async () => ({
+      status: 'success',
+      data: url === '/trace/api/notifications'
+        ? [
+            { id: 1, message: 'Đã đọc', export_time: '08:00' },
+            { id: 2, message: 'Đã đọc riêng', export_time: '08:01' },
+            { id: 3, message: 'Chưa đọc', export_time: '08:02' },
+          ]
+        : [],
+    }),
+  }));
+
+  render(<App />);
+
+  expect(await screen.findByTestId('notification-badge')).toHaveTextContent('1');
+  fireEvent.click(screen.getByRole('button', { name: /^Thông báo$/i }));
+  expect(screen.queryByText('Đã đọc')).not.toBeInTheDocument();
+  expect(screen.queryByText('Đã đọc riêng')).not.toBeInTheDocument();
+  expect(screen.getByText('Chưa đọc')).toBeInTheDocument();
 });

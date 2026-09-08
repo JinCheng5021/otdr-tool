@@ -104,10 +104,6 @@ const App: React.FC = () => {
           <span className="font-headline-md text-[18px] font-extrabold tracking-tight text-industrial-navy">PMB - TraceViewer</span>
         </div>
         <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2 text-status-pass bg-status-pass/10 px-3 py-1 rounded-full border border-status-pass/20 animate-pulse-soft">
-            <div className="w-2 h-2 rounded-full bg-status-pass"></div>
-            <span className="text-[10px] font-bold uppercase tracking-widest">System Ready</span>
-          </div>
           <NotificationDropdown />
         </div>
       </header>
