@@ -8,6 +8,13 @@
   position: relative;
 }
 
+/* Mobile route graph owns the vertical scroll because its parent is intentionally clipped. */
+.mobile-route-graph {
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
 /* =========================================
    TẦNG 1: TOP HEADER
 ========================================= */

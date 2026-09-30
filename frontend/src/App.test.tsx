@@ -5,6 +5,7 @@ import {
   fireEvent,
   render,
   screen,
+  within,
   waitFor,
 } from '@testing-library/react';
 import App from './App';
@@ -65,6 +66,10 @@ test('renders the trace export screen', () => {
   expect(screen.getByRole('img', { name: /^FPT$/i })).toBeInTheDocument();
   expect(screen.getByText(/^PMB - TraceViewer$/i)).toBeInTheDocument();
   expect(screen.queryByText(/^System Ready$/i)).not.toBeInTheDocument();
+  expect(screen.queryByText(/^Thống kê phiên$/i)).not.toBeInTheDocument();
+  expect(
+    screen.getByRole('button', { name: /Hướng dẫn sử dụng/i }),
+  ).toBeInTheDocument();
   expect(
     screen.queryByRole('heading', { name: /Cấu hình Xuất Excel Tuyến/i }),
   ).not.toBeInTheDocument();
@@ -145,58 +150,89 @@ test('shows route graph navigation in its own header', () => {
   ).toBeInTheDocument();
 });
 
-test('updates session statistics from recognized traces', async () => {
+test('keeps event details and the event list reachable in the mobile route graph', async () => {
+  const originalMatchMedia = window.matchMedia;
+  Object.defineProperty(window, 'matchMedia', {
+    writable: true,
+    value: (query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+      addListener: () => undefined,
+      removeListener: () => undefined,
+      dispatchEvent: () => false,
+    }),
+  });
   (axios.post as jest.Mock).mockResolvedValueOnce({
     data: {
       results: [{
         status: 'success',
-        filename: 'multi-trace.msor',
-        total_traces: 2,
-        traces: [],
+        filename: 'mobile-route.sor',
+        total_traces: 1,
+        traces: [{
+          trace_name: 'Trace 1',
+          metadata: {
+            wavelength: '1550 nm',
+            pulse_width: '100 ns',
+            index_of_refraction: 1.468,
+            number_of_data_points: 2,
+            total_loss: 0.7,
+            fiber_length: 1000,
+            measurement_date: '2026-09-30',
+            machine_type: 'OTDR',
+          },
+          data: [[0, 0], [1, 0.7]],
+          events: [{
+            event_number: 1,
+            distance_km: 1,
+            event_type: 'non-reflective',
+            splice_loss_db: 0.7,
+            reflectance_db: null,
+            slope_db_km: 0.2,
+            section_loss_db: 0.7,
+            cumulative_loss_db: 0.7,
+          }],
+        }],
       }],
     },
   });
-  render(<App />);
 
-  fireEvent.drop(exportDropzone(), {
-    dataTransfer: { files: [new File(['trace'], 'multi-trace.msor')] },
-  });
+  try {
+    render(<App />);
+    fireEvent.drop(exportDropzone(), {
+      dataTransfer: { files: [new File(['trace'], 'mobile-route.sor')] },
+    });
+    await waitFor(() => expect(axios.post).toHaveBeenCalledTimes(1));
 
-  await waitFor(() => {
-    expect(screen.getByLabelText('Trace nạp')).toHaveTextContent('02');
-  });
-  expect(screen.getByLabelText('Lỗi nhận diện')).toHaveTextContent('00');
+    openRouteGraph();
+
+    expect(await screen.findByText('Danh sách sự kiện')).toBeInTheDocument();
+    expect(screen.getByText(/Chạm vào sự kiện trên biểu đồ hoặc danh sách/i)).toBeInTheDocument();
+    expect(document.querySelector('.mobile-route-graph')).toBeInTheDocument();
+  } finally {
+    Object.defineProperty(window, 'matchMedia', {
+      writable: true,
+      value: originalMatchMedia,
+    });
+  }
 });
 
-test('counts recognition failures and resets them for a replacement batch', async () => {
-  (axios.post as jest.Mock)
-    .mockRejectedValueOnce(new Error('unrecognized trace'))
-    .mockResolvedValueOnce({
-      data: {
-        results: [{
-          status: 'success',
-          filename: 'replacement.sor',
-          total_traces: 1,
-          traces: [],
-        }],
-      },
-    });
+test('opens and closes the detailed usage guide', () => {
   render(<App />);
 
-  fireEvent.drop(exportDropzone(), {
-    dataTransfer: { files: [new File(['bad'], 'bad.sor')] },
-  });
-  await waitFor(() => {
-    expect(screen.getByLabelText('Lỗi nhận diện')).toHaveTextContent('01');
-  });
+  fireEvent.click(screen.getByRole('button', { name: /Hướng dẫn sử dụng/i }));
+  const guide = screen.getByRole('dialog', { name: /^Hướng dẫn sử dụng$/i });
 
-  fireEvent.drop(exportDropzone(), {
-    dataTransfer: { files: [new File(['good'], 'replacement.sor')] },
-  });
-  await waitFor(() => {
-    expect(screen.getByLabelText('Trace nạp')).toHaveTextContent('01');
-    expect(screen.getByLabelText('Lỗi nhận diện')).toHaveTextContent('00');
-  });
+  expect(within(guide).getByText('Quy trình xuất báo cáo nhanh')).toBeInTheDocument();
+  expect(within(guide).getByText('Chi tiết chức năng')).toBeInTheDocument();
+  expect(within(guide).getByRole('rowheader', { name: 'Nạp tệp đo' })).toBeInTheDocument();
+  expect(within(guide).getByRole('rowheader', { name: 'Đồ thị tuyến' })).toBeInTheDocument();
+  expect(within(guide).getByRole('rowheader', { name: 'Thông báo' })).toBeInTheDocument();
+
+  fireEvent.click(within(guide).getByRole('button', { name: /Đóng hướng dẫn sử dụng/i }));
+  expect(screen.queryByRole('dialog', { name: /^Hướng dẫn sử dụng$/i })).not.toBeInTheDocument();
 });
 
 test('automatically analyzes the Excel input batch for the route graph', async () => {

@@ -2,6 +2,7 @@ import React, { useCallback, useState } from 'react';
 import CurrentApp from './components/CurrentApp';
 import TraceViewer from './components/TraceViewer';
 import NotificationDropdown from './components/NotificationDropdown';
+import UsageGuideModal from './components/UsageGuideModal';
 import {
   type InputFileSelection,
   selectInputFiles,
@@ -24,18 +25,16 @@ const EMPTY_SESSION_STATS: SessionStats = {
   recognitionErrors: 0,
 };
 
-const formatSessionCount = (value: number): string =>
-  Math.max(0, Math.trunc(value)).toString().padStart(2, '0');
-
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'current' | 'traceviewer'>('traceviewer');
   const [parameterMode, setParameterMode] = useState<ParameterMode>('basic');
   const [systemOptionsOpen, setSystemOptionsOpen] = useState(false);
+  const [isUsageGuideOpen, setIsUsageGuideOpen] = useState(false);
   const [inputBatch, setInputBatch] = useState<InputBatch>({
     files: [],
     revision: 0,
   });
-  const [sessionStats, setSessionStats] = useState<SessionStats>(EMPTY_SESSION_STATS);
+  const [, setSessionStats] = useState<SessionStats>(EMPTY_SESSION_STATS);
 
   const replaceInputFiles = useCallback((incomingFiles: File[]): InputFileSelection => {
     const selection = selectInputFiles(incomingFiles);
@@ -198,41 +197,18 @@ const App: React.FC = () => {
             </nav>
           </div>
           
-          <section
-            className="mt-auto bg-surface-container-high/50 p-4 rounded-xl border border-outline-variant"
-            aria-labelledby="session-stats-heading"
+          <button
+            type="button"
+            onClick={() => setIsUsageGuideOpen(true)}
+            className="mt-auto flex w-full items-center gap-3 rounded-xl border border-outline-variant bg-surface-container-high/50 p-4 text-left text-on-surface-variant transition-colors hover:border-primary/30 hover:bg-primary-fixed/30 hover:text-primary"
           >
-            <div className="flex items-center gap-2 mb-3">
-              <span className="material-symbols-outlined text-[18px] text-industrial-navy">info</span>
-              <span id="session-stats-heading" className="text-[11px] font-bold text-on-surface-variant tracking-wider uppercase">Thống kê phiên</span>
+            <span className="material-symbols-outlined text-[22px]" aria-hidden="true">menu_book</span>
+            <div className="min-w-0 flex-1">
+              <span className="block text-sm font-bold text-industrial-navy">Hướng dẫn sử dụng</span>
+              <span className="mt-0.5 block text-[11px] leading-relaxed">Xem chi tiết chức năng của app</span>
             </div>
-            <ul className="space-y-3">
-              <li className="flex justify-between items-center">
-                <span className="text-xs text-on-surface-variant">Trace nạp:</span>
-                <span
-                  className="font-mono-data text-sm font-bold text-primary"
-                  aria-label="Trace nạp"
-                  aria-live="polite"
-                >
-                  {formatSessionCount(sessionStats.loadedTraces)}
-                </span>
-              </li>
-              <li className="flex justify-between items-center">
-                <span className="text-xs text-on-surface-variant">Lỗi nhận diện:</span>
-                <span
-                  className="font-mono-data text-sm font-bold text-error"
-                  aria-label="Lỗi nhận diện"
-                  aria-live="polite"
-                >
-                  {formatSessionCount(sessionStats.recognitionErrors)}
-                </span>
-              </li>
-              <li className="flex justify-between items-center">
-                <span className="text-xs text-on-surface-variant">Phiên bản:</span>
-                <span className="font-mono-data text-xs text-on-surface-variant">v2.1.4</span>
-              </li>
-            </ul>
-          </section>
+            <span className="material-symbols-outlined text-[18px]" aria-hidden="true">chevron_right</span>
+          </button>
         </aside>
 
         {/* Center Visualization & Configuration Area */}
@@ -281,6 +257,10 @@ const App: React.FC = () => {
       </nav>
       {/* Mobile Nav Spacing */}
       <div className="h-16 md:hidden"></div>
+      <UsageGuideModal
+        open={isUsageGuideOpen}
+        onClose={() => setIsUsageGuideOpen(false)}
+      />
         </div>
       )}
     </>

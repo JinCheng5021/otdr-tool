@@ -291,7 +291,7 @@ const MobileLayout: React.FC<SharedLayoutProps> = ({
 
   return (
     <div
-      className="app-container"
+      className="app-container mobile-route-graph"
       onDragEnter={onDragEnterGlobal}
       onDragLeave={onDragLeaveGlobal}
       onDragOver={onDragOverGlobal}
