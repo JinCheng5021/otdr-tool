@@ -5482,6 +5482,161 @@ def _fr_clip_sections_to_range(sections: list[dict], start_km: Optional[float], 
     return clipped
 
 
+def _fr_clip_event_defs_to_range(
+    event_defs: list[dict],
+    start_km: Optional[float],
+    end_km: Optional[float],
+) -> list[dict]:
+    """Return only common event definitions inside the selected absolute range."""
+    if start_km is None or end_km is None:
+        return event_defs
+    try:
+        range_start = min(float(start_km), float(end_km))
+        range_end = max(float(start_km), float(end_km))
+    except Exception:
+        return event_defs
+    if not (math.isfinite(range_start) and math.isfinite(range_end)) or range_end <= range_start:
+        return []
+
+    clipped: list[dict] = []
+    for item in event_defs:
+        try:
+            distance_km = float(item.get('distance_km'))
+        except Exception:
+            continue
+        if not (range_start <= distance_km <= range_end):
+            continue
+        copied = dict(item)
+        copied['index'] = len(clipped) + 1
+        clipped.append(copied)
+    return clipped
+
+
+def _fr_assess_graph_for_selected_range(
+    summary: FileSummary,
+    start_km: float,
+    end_km: float,
+    *,
+    jumper_excluded_m: float,
+    length_tolerance_km: float,
+    graph_reach_tolerance_km: Optional[float],
+    event_shortfall_tolerance_km: Optional[float],
+    overlength_tolerance_km: Optional[float],
+) -> GraphAssessment:
+    """Run the existing graph-reach rules against only the selected segment."""
+    range_start = min(float(start_km), float(end_km))
+    range_end = max(float(start_km), float(end_km))
+    span_km = max(range_end - range_start, 0.0)
+    jumper_km = max(float(jumper_excluded_m), 0.0) / 1000.0
+    segment_jumper_km = max(min(jumper_km, range_end) - range_start, 0.0)
+
+    graph_end_abs = summary.graph_end_km
+    event_end_abs = summary.length_km
+    graph_covered_km = None
+    event_covered_km = None
+    if graph_end_abs is not None:
+        graph_covered_km = max(min(float(graph_end_abs), range_end) - range_start, 0.0)
+    if event_end_abs is not None:
+        event_covered_km = max(min(float(event_end_abs), range_end) - range_start, 0.0)
+
+    segment_summary = _TotalLossTraceContext(
+        total_loss_db=None,
+        length_km=event_covered_km,
+        end_distance_km=event_covered_km,
+        graph_end_km=graph_covered_km,
+        graph_curve_max_km=graph_covered_km,
+    )
+    assessed = _assess_graph_length(
+        segment_summary,
+        expected_route_km=span_km,
+        jumper_excluded_m=segment_jumper_km * 1000.0,
+        length_tolerance_km=length_tolerance_km,
+        graph_reach_tolerance_km=graph_reach_tolerance_km,
+        event_shortfall_tolerance_km=event_shortfall_tolerance_km,
+        overlength_tolerance_km=overlength_tolerance_km,
+    )
+
+    absolute_graph_end = None
+    if graph_end_abs is not None:
+        absolute_graph_end = round(min(max(float(graph_end_abs), 0.0), range_end), 3)
+    reason_prefix = f'Đoạn {range_start:.3f} - {range_end:.3f} km'
+    reason = f'{reason_prefix}: {assessed.reason}' if assessed.reason else reason_prefix
+    return GraphAssessment(
+        graph_end_km=absolute_graph_end,
+        jumper_excluded_km=assessed.jumper_excluded_km,
+        net_graph_length_km=assessed.net_graph_length_km,
+        expected_route_km=assessed.expected_route_km,
+        event_length_km=assessed.event_length_km,
+        diff_km=assessed.diff_km,
+        graph_reach_tolerance_km=assessed.graph_reach_tolerance_km,
+        event_shortfall_tolerance_km=assessed.event_shortfall_tolerance_km,
+        overlength_tolerance_km=assessed.overlength_tolerance_km,
+        graph_reaches_expected=assessed.graph_reaches_expected,
+        verdict=assessed.verdict,
+        reason=reason,
+    )
+
+
+def _fr_build_selected_range_contexts(
+    summaries: list[FileSummary],
+    contexts: dict[str, dict],
+    start_km: float,
+    end_km: float,
+    *,
+    jumper_excluded_m: float,
+    length_tolerance_km: float,
+    graph_reach_tolerance_km: Optional[float],
+    event_shortfall_tolerance_km: Optional[float],
+    overlength_tolerance_km: Optional[float],
+) -> dict[str, dict]:
+    """Build an isolated report view while preserving full-route core inputs."""
+    range_start = min(float(start_km), float(end_km))
+    range_end = max(float(start_km), float(end_km))
+    report_contexts: dict[str, dict] = {}
+
+    for summary in summaries:
+        source_ctx = contexts.get(summary.file_name, {})
+        report_ctx = dict(source_ctx)
+        report_ctx['events'] = [
+            row
+            for row in source_ctx.get('events', [])
+            if row.distance_km is not None
+            and range_start <= float(row.distance_km) <= range_end
+        ]
+        segment = source_ctx.get('segment_assessment')
+        if segment is not None:
+            report_ctx['report_start_km'] = segment.start_km
+            report_ctx['report_end_km'] = segment.end_km
+            report_ctx['report_length_km'] = segment.span_km
+            report_ctx['report_total_loss_db'] = segment.segment_total_loss_db
+            report_ctx['report_attenuation_dbkm'] = segment.segment_attenuation_dbkm
+            report_ctx['report_loss_source_used'] = 'Tính lại theo đoạn đã chọn'
+            details = '; '.join(part for part in [segment.method, segment.note] if part)
+            report_ctx['report_total_loss_selection_reason'] = details
+        else:
+            report_ctx['report_start_km'] = range_start
+            report_ctx['report_end_km'] = range_end
+            report_ctx['report_length_km'] = max(range_end - range_start, 0.0)
+            report_ctx['report_total_loss_db'] = None
+            report_ctx['report_attenuation_dbkm'] = None
+            report_ctx['report_loss_source_used'] = 'Không đủ dữ liệu tính đoạn'
+            report_ctx['report_total_loss_selection_reason'] = 'Không có kết quả phân tích đoạn cho file này.'
+        report_ctx['report_scope'] = 'selected_range'
+        report_ctx['graph_assessment'] = _fr_assess_graph_for_selected_range(
+            summary,
+            range_start,
+            range_end,
+            jumper_excluded_m=jumper_excluded_m,
+            length_tolerance_km=length_tolerance_km,
+            graph_reach_tolerance_km=graph_reach_tolerance_km,
+            event_shortfall_tolerance_km=event_shortfall_tolerance_km,
+            overlength_tolerance_km=overlength_tolerance_km,
+        )
+        report_contexts[summary.file_name] = report_ctx
+
+    return report_contexts
+
+
 
 
 
@@ -6755,6 +6910,10 @@ def _build_core_metrics(summary: FileSummary, ctx: dict, threshold_db: float = 0
         section_pairs = ctx.get('section_pairs') or []
     section_losses = [float(loss) for loss, _att in (section_pairs or []) if isinstance(loss, (int, float))]
     duration_s, duration_status, duration_note = _duration_status_from_meta(ctx, duration_threshold_s)
+    report_length_km = ctx['report_length_km'] if 'report_length_km' in ctx else summary.length_km
+    report_total_loss_db = ctx['report_total_loss_db'] if 'report_total_loss_db' in ctx else summary.total_loss_db
+    report_attenuation_dbkm = ctx['report_attenuation_dbkm'] if 'report_attenuation_dbkm' in ctx else summary.attenuation_dbkm
+    report_loss_source = ctx.get('report_loss_source_used', getattr(summary, 'loss_source_used', ''))
     return {
         'file_name': summary.file_name,
         'display_file_name': _stv_display_file_name(summary.file_name),
@@ -6763,12 +6922,12 @@ def _build_core_metrics(summary: FileSummary, ctx: dict, threshold_db: float = 0
         'fiber_raw': summary.fiber,
         'wavelength_nm': wavelength_nm,
         'wavelength_display': summary.wavelength_display,
-        'length_km': summary.length_km,
-        'total_loss_db': summary.total_loss_db,
-        'attenuation_dbkm': summary.attenuation_dbkm,
+        'length_km': report_length_km,
+        'total_loss_db': report_total_loss_db,
+        'attenuation_dbkm': report_attenuation_dbkm,
         'orl_display': ctx.get('orl_display'),
         'orl_status': ctx.get('orl_status', 'Unknown'),
-        'loss_source_used': getattr(summary, 'loss_source_used', ''),
+        'loss_source_used': report_loss_source,
         'parse_family': getattr(summary, 'parse_family', ''),
         'parse_family_reason': getattr(summary, 'parse_family_reason', ''),
         'event_count': len(event_rows),
@@ -7423,7 +7582,37 @@ def _stv_auto_assessment_status(ga, attenuation_dbkm, point_losses: list[float])
     return 'Đạt'
 
 
-
+def _stv_bucketed_point_losses(
+    summary: FileSummary,
+    ctx: dict,
+    event_defs: list[dict],
+    deviation_m: float,
+    threshold_db: float,
+) -> tuple[list[EventRow], dict[int, float]]:
+    core = _build_core_metrics(summary, ctx, threshold_db=threshold_db)
+    wavelength_nm = str(core['wavelength_nm']) if core['wavelength_nm'] else None
+    rows = _fr_pick_rows_for_file(ctx.get('events', []), wavelength_nm)
+    ordered = sorted(
+        [row for row in rows if row.distance_km is not None],
+        key=lambda row: (float(row.distance_km or 0.0), str(row.event_no)),
+    )
+    bucketed: dict[int, float] = {}
+    for idx_row, row in enumerate(ordered):
+        is_terminal = idx_row == len(ordered) - 1 and row.event_type == 'Fiber End'
+        value = _stv_display_loss_for_row(
+            row,
+            threshold_db=threshold_db,
+            is_terminal_row=is_terminal,
+        )
+        if value is None:
+            continue
+        def_idx = _fr_assign_event_to_def(row, event_defs, deviation_m)
+        if def_idx is None:
+            continue
+        previous = bucketed.get(def_idx)
+        if previous is None or value > previous:
+            bucketed[def_idx] = value
+    return ordered, bucketed
 
 
 def _stv_fill_main_sheet(
@@ -7439,7 +7628,11 @@ def _stv_fill_main_sheet(
     event_shortfall_tolerance_km: Optional[float],
     stv_total_core: Optional[int] = None,
     stv_used_core: Optional[int] = None,
+    assessment_contexts: Optional[dict[str, dict]] = None,
+    assessment_event_defs: Optional[list[dict]] = None,
 ) -> None:
+    assessment_contexts = contexts if assessment_contexts is None else assessment_contexts
+    assessment_event_defs = event_defs if assessment_event_defs is None else assessment_event_defs
     distance_list = [float(item.get('distance_km') or 0.0) for item in (event_defs or [])]
     event_start_col = 10
 
@@ -7482,9 +7675,12 @@ def _stv_fill_main_sheet(
 
     for row_idx, summary in enumerate(summaries, start=6):
         ctx = contexts.get(summary.file_name) or {}
+        assessment_ctx = assessment_contexts.get(summary.file_name) or {}
         core = _build_core_metrics(summary, ctx, threshold_db=threshold_db)
+        assessment_core = _build_core_metrics(summary, assessment_ctx, threshold_db=threshold_db)
         ga = ctx.get('graph_assessment')
-        total_loss = _selected_total_loss_db(summary, core['total_loss_db'])
+        assessment_ga = assessment_ctx.get('graph_assessment')
+        total_loss = core['total_loss_db']
         length_km = core['length_km']
         if total_loss is not None and length_km not in (None, 0):
             attenuation = round(total_loss / length_km, 3)
@@ -7507,27 +7703,36 @@ def _stv_fill_main_sheet(
         ws.cell(row_idx, 7).number_format = '0.000############'
         ws.cell(row_idx, 8).number_format = '0.000'
 
-        wavelength_nm = str(core['wavelength_nm']) if core['wavelength_nm'] else None
-        rows = _fr_pick_rows_for_file(ctx.get('events', []), wavelength_nm)
-        ordered = sorted([r for r in rows if r.distance_km is not None], key=lambda r: (float(r.distance_km or 0.0), str(r.event_no)))
+        _ordered, bucketed = _stv_bucketed_point_losses(
+            summary,
+            ctx,
+            event_defs,
+            deviation_m,
+            threshold_db,
+        )
+        _assessment_ordered, assessment_bucketed = _stv_bucketed_point_losses(
+            summary,
+            assessment_ctx,
+            assessment_event_defs,
+            deviation_m,
+            threshold_db,
+        )
 
         if distance_list:
-            ws.cell(row_idx, event_start_col, 'Đầu tuyến')
+            start_label = 'Đầu đoạn' if ctx.get('report_scope') == 'selected_range' else 'Đầu tuyến'
+            ws.cell(row_idx, event_start_col, start_label)
 
-        bucketed: dict[int, float] = {}
-        for idx_row, row in enumerate(ordered):
-            is_terminal = idx_row == len(ordered) - 1 and row.event_type == 'Fiber End'
-            value = _stv_display_loss_for_row(row, threshold_db=threshold_db, is_terminal_row=is_terminal)
-            if value is None:
-                continue
-            def_idx = _fr_assign_event_to_def(row, event_defs, deviation_m)
-            if def_idx is None:
-                continue
-            prev = bucketed.get(def_idx)
-            if prev is None or value > prev:
-                bucketed[def_idx] = value
-
-        assessment = _stv_auto_assessment_status(ga, attenuation, list(bucketed.values()))
+        assessment_total_loss = _selected_total_loss_db(summary, assessment_core['total_loss_db'])
+        assessment_length_km = assessment_core['length_km']
+        if assessment_total_loss is not None and assessment_length_km not in (None, 0):
+            assessment_attenuation = round(assessment_total_loss / assessment_length_km, 3)
+        else:
+            assessment_attenuation = assessment_core['attenuation_dbkm']
+        assessment = _stv_auto_assessment_status(
+            assessment_ga,
+            assessment_attenuation,
+            list(assessment_bucketed.values()),
+        )
         assessment_cell = ws.cell(row_idx, 9, assessment)
         assessment_fill = _stv_assessment_fill(assessment)
         if assessment_fill is not None:
@@ -7538,18 +7743,20 @@ def _stv_fill_main_sheet(
             cell.number_format = '0.000'
             cell.fill = RED_FILL
 
-        if summary.end_distance_km not in (None, 0) and distance_list:
+        display_end_km = ctx.get('report_end_km', summary.end_distance_km)
+        if display_end_km not in (None, 0) and distance_list:
             end_idx = None
             best_gap = None
             for item in event_defs:
-                gap = abs(float(summary.end_distance_km) - float(item.get('distance_km') or 0.0))
+                gap = abs(float(display_end_km) - float(item.get('distance_km') or 0.0))
                 if best_gap is None or gap < best_gap:
                     best_gap = gap
                     end_idx = int(item.get('index') or 0)
             if end_idx:
                 end_col = event_start_col + (end_idx - 1)
                 if ws.cell(row_idx, end_col).value in (None, ''):
-                    ws.cell(row_idx, end_col, 'Cuối tuyến')
+                    end_label = 'Cuối đoạn' if ctx.get('report_scope') == 'selected_range' else 'Cuối tuyến'
+                    ws.cell(row_idx, end_col, end_label)
 
     # First and second KPI tables restoration
     from openpyxl.styles import Font, PatternFill, Alignment
@@ -7631,35 +7838,29 @@ def _stv_fill_main_sheet(
     cnt_dut = 0
     cnt_suyhao = 0
     for summary in summaries:
-        ctx = contexts.get(summary.file_name) or {}
-        ga = ctx.get('graph_assessment')
-        core = _build_core_metrics(summary, ctx, threshold_db=threshold_db)
-        
-        # Re-run same bucket logic as main loop to get values for assessment
-        wavelength_nm = str(core['wavelength_nm']) if core['wavelength_nm'] else None
-        rows = _fr_pick_rows_for_file(ctx.get('events', []), wavelength_nm)
-        ordered = sorted([r for r in rows if r.distance_km is not None], key=lambda r: (float(r.distance_km or 0.0), str(r.event_no)))
-        bucketed: dict[int, float] = {}
-        for idx_row, row in enumerate(ordered):
-            is_terminal = idx_row == len(ordered) - 1 and row.event_type == 'Fiber End'
-            value = _stv_display_loss_for_row(row, threshold_db=threshold_db, is_terminal_row=is_terminal)
-            if value is None:
-                continue
-            def_idx = _fr_assign_event_to_def(row, event_defs, deviation_m)
-            if def_idx is None:
-                continue
-            prev = bucketed.get(def_idx)
-            if prev is None or value > prev:
-                bucketed[def_idx] = value
+        assessment_ctx = assessment_contexts.get(summary.file_name) or {}
+        assessment_ga = assessment_ctx.get('graph_assessment')
+        assessment_core = _build_core_metrics(summary, assessment_ctx, threshold_db=threshold_db)
+        _ordered, assessment_bucketed = _stv_bucketed_point_losses(
+            summary,
+            assessment_ctx,
+            assessment_event_defs,
+            deviation_m,
+            threshold_db,
+        )
 
-        total_loss = _selected_total_loss_db(summary, core['total_loss_db'])
-        length_km = core['length_km']
+        total_loss = _selected_total_loss_db(summary, assessment_core['total_loss_db'])
+        length_km = assessment_core['length_km']
         if total_loss is not None and length_km not in (None, 0):
             attenuation = round(total_loss / length_km, 3)
         else:
-            attenuation = core['attenuation_dbkm']
+            attenuation = assessment_core['attenuation_dbkm']
 
-        assessment = _stv_auto_assessment_status(ga, attenuation, list(bucketed.values()))
+        assessment = _stv_auto_assessment_status(
+            assessment_ga,
+            attenuation,
+            list(assessment_bucketed.values()),
+        )
         if assessment == 'Đạt':
             cnt_dat += 1
         elif assessment == 'Đứt':
@@ -7710,6 +7911,7 @@ def _stv_fill_graph_check_sheet(ws, summaries: list[FileSummary], contexts: dict
     row = 2
     for summary in summaries:
         ctx = contexts.get(summary.file_name) or {}
+        core = _build_core_metrics(summary, ctx)
         ga = ctx.get('graph_assessment')
         ws.cell(row, 1, _stv_display_file_name(summary.file_name))
         ws.cell(row, 2, summary.source_format)
@@ -7730,10 +7932,16 @@ def _stv_fill_graph_check_sheet(ws, summaries: list[FileSummary], contexts: dict
                 ws.cell(row, 13, 'Không')
             ws.cell(row, 14, ga.verdict)
             ws.cell(row, 15, ga.reason)
-        ws.cell(row, 16, summary.parsed_total_loss_db)
-        ws.cell(row, 17, summary.route_corrected_total_loss_db)
-        ws.cell(row, 18, summary.loss_source_used)
-        ws.cell(row, 19, summary.total_loss_selection_reason)
+        if ctx.get('report_scope') == 'selected_range':
+            ws.cell(row, 16, core['total_loss_db'])
+            ws.cell(row, 17, None)
+            ws.cell(row, 18, core['loss_source_used'])
+            ws.cell(row, 19, ctx.get('report_total_loss_selection_reason', ''))
+        else:
+            ws.cell(row, 16, summary.parsed_total_loss_db)
+            ws.cell(row, 17, summary.route_corrected_total_loss_db)
+            ws.cell(row, 18, summary.loss_source_used)
+            ws.cell(row, 19, summary.total_loss_selection_reason)
         row += 1
     for c in range(1, 20):
         ws.column_dimensions[get_column_letter(c)].width = 18
@@ -9487,8 +9695,22 @@ def _stv_build_workbook(
     duration_threshold_s: Optional[float] = None,
     stv_total_core: Optional[int] = None,
     stv_used_core: Optional[int] = None,
+    report_contexts: Optional[dict[str, dict]] = None,
+    report_event_defs: Optional[list[dict]] = None,
 ) -> BytesIO:
     section_rows = sections or []
+    report_contexts = contexts if report_contexts is None else report_contexts
+    report_event_defs = event_defs if report_event_defs is None else report_event_defs
+    display_expected_route_km = expected_route_km
+    display_jumper_excluded_m = jumper_excluded_m
+    for report_ctx in report_contexts.values():
+        if report_ctx.get('report_scope') != 'selected_range':
+            continue
+        report_ga = report_ctx.get('graph_assessment')
+        if report_ga is not None:
+            display_expected_route_km = report_ga.expected_route_km
+            display_jumper_excluded_m = report_ga.jumper_excluded_km * 1000.0
+        break
     template_path = Path(__file__).with_name('2.xlsx')
     if not template_path.exists():
         raise FileNotFoundError('Không tìm thấy template Excel (2.xlsx) trong thư mục chương trình.')
@@ -9506,16 +9728,18 @@ def _stv_build_workbook(
     _stv_fill_main_sheet(
         ws_main,
         summaries,
-        contexts,
-        event_defs,
+        report_contexts,
+        report_event_defs,
         deviation_m=deviation_m,
         threshold_db=threshold_db,
-        expected_route_km=expected_route_km,
-        jumper_excluded_m=jumper_excluded_m,
+        expected_route_km=display_expected_route_km,
+        jumper_excluded_m=display_jumper_excluded_m,
         graph_reach_tolerance_km=graph_reach_tolerance_km,
         event_shortfall_tolerance_km=event_shortfall_tolerance_km,
         stv_total_core=stv_total_core,
         stv_used_core=stv_used_core,
+        assessment_contexts=contexts,
+        assessment_event_defs=event_defs,
     )
     _fr_fill_sections(
         wb['Sections'],
@@ -9528,7 +9752,7 @@ def _stv_build_workbook(
         section_threshold_db=section_threshold_db,
     )
     ws_graph = wb.create_sheet('Kiểm tra đồ thị')
-    _stv_fill_graph_check_sheet(ws_graph, summaries, contexts)
+    _stv_fill_graph_check_sheet(ws_graph, summaries, report_contexts)
     ws_skipped = wb.create_sheet('Tệp bỏ qua')
     _stv_fill_skipped_sheet(ws_skipped, skipped)
     ws_strict = wb.create_sheet('Strict Validation')
@@ -9588,11 +9812,29 @@ def build_workbook_from_uploads(
         raise ValueError(message)
 
     event_defs = _fr_build_common_event_defs(contexts, deviation_m=deviation_m)
+    report_contexts = contexts
+    report_event_defs = event_defs
     sections = _fr_build_common_sections(event_defs, summaries, contexts, deviation_m=deviation_m, threshold_db=threshold_db, section_merge_tolerance_m=section_merge_tolerance_m, section_min_length_km=section_min_length_km, section_event_source=section_event_source, section_boundary_priority=section_boundary_priority, section_allow_split=section_allow_split)
     if str(section_export_scope).lower() == 'selected_range' and segment_start_km is not None and segment_end_km is not None:
         sections = _fr_clip_sections_to_range(sections, segment_start_km, segment_end_km)
+        report_contexts = _fr_build_selected_range_contexts(
+            summaries,
+            contexts,
+            segment_start_km,
+            segment_end_km,
+            jumper_excluded_m=jumper_excluded_m,
+            length_tolerance_km=length_tolerance_km,
+            graph_reach_tolerance_km=graph_reach_tolerance_km,
+            event_shortfall_tolerance_km=event_shortfall_tolerance_km,
+            overlength_tolerance_km=overlength_tolerance_km,
+        )
+        report_event_defs = _fr_clip_event_defs_to_range(
+            _fr_build_common_event_defs(report_contexts, deviation_m=deviation_m),
+            segment_start_km,
+            segment_end_km,
+        )
         try:
-            _fr_log(logs, 'run', 'INFO', f'Giới hạn xuất Sections theo đoạn người dùng chọn: {min(float(segment_start_km), float(segment_end_km)):.3f} - {max(float(segment_start_km), float(segment_end_km)):.3f} km | Số section sau khi cắt: {len(sections)}')
+            _fr_log(logs, 'run', 'INFO', f'Giới hạn phân tích theo đoạn người dùng chọn: {min(float(segment_start_km), float(segment_end_km)):.3f} - {max(float(segment_start_km), float(segment_end_km)):.3f} km | Số event: {len(report_event_defs)} | Số section: {len(sections)}')
         except Exception:
             pass
     elif str(section_export_scope).lower() == 'selected_range':
@@ -9624,6 +9866,8 @@ def build_workbook_from_uploads(
             duration_threshold_s=duration_threshold_s,
             stv_total_core=stv_total_core,
             stv_used_core=stv_used_core,
+            report_contexts=report_contexts,
+            report_event_defs=report_event_defs,
         )
 
     template_path = Path(__file__).with_name('2.xlsx')
@@ -9643,10 +9887,10 @@ def build_workbook_from_uploads(
     section_pairs_by_file = _fr_fill_sections(wb['Sections'], summaries, contexts, sections, threshold_db, section_match_tolerance_m=section_match_tolerance_m, section_measurement_mode=section_measurement_mode, section_threshold_db=section_threshold_db)
 
     # Link results
-    _fr_fill_link_results(wb['Link Results'], summaries, contexts, section_pairs_by_file, duration_threshold_s=duration_threshold_s)
+    _fr_fill_link_results(wb['Link Results'], summaries, report_contexts, section_pairs_by_file, duration_threshold_s=duration_threshold_s)
 
     # Events
-    _fr_fill_events(wb['Events'], summaries, contexts, event_defs, deviation_m, threshold_db)
+    _fr_fill_events(wb['Events'], summaries, report_contexts, report_event_defs, deviation_m, threshold_db)
 
     # Export retained control and diagnostic sheets without changing core algorithms.
     for extra_name in ['App Parameters', 'Route Analysis', 'Segment Analysis', 'Segment Events', 'Section Fit Quality', 'Raw Trace Diagnostics', 'ORL Analysis', 'Parser Diagnostics', 'Vendor Compatibility', 'Strict Validation', 'Run Log', 'Core Metrics', 'Output Rules']:
@@ -9676,7 +9920,7 @@ def build_workbook_from_uploads(
         section_measurement_mode=section_measurement_mode,
     )
     ws_route = wb.create_sheet('Route Analysis')
-    _fr_fill_route_analysis_sheet(ws_route, summaries, contexts)
+    _fr_fill_route_analysis_sheet(ws_route, summaries, report_contexts)
     ws_segment = wb.create_sheet('Segment Analysis')
     _fr_fill_segment_analysis_sheet(ws_segment, summaries, contexts)
     ws_segment_events = wb.create_sheet('Segment Events')
@@ -9684,7 +9928,7 @@ def build_workbook_from_uploads(
     ws_strict = wb.create_sheet('Strict Validation')
     _fr_fill_strict_validation_sheet(ws_strict, summaries, contexts, expected_route_km=expected_route_km, length_tolerance_km=length_tolerance_km if 'length_tolerance_km' in locals() else 0.300, graph_reach_tolerance_km=graph_reach_tolerance_km, event_shortfall_tolerance_km=event_shortfall_tolerance_km, duration_threshold_s=duration_threshold_s if 'duration_threshold_s' in locals() else None, skipped=skipped)
     ws_log = wb.create_sheet('Run Log')
-    _fr_log(logs, 'run', 'INFO', f'Tổng file hợp lệ: {len(summaries)} | Event defs: {len(event_defs)} | Sections: {len(sections)}')
+    _fr_log(logs, 'run', 'INFO', f'Tổng file hợp lệ: {len(summaries)} | Event defs xuất: {len(report_event_defs)} | Sections: {len(sections)}')
     _fr_log(logs, 'run', 'INFO', f'Thời gian dựng workbook: {time.perf_counter() - t0:.2f}s')
     _fr_fill_run_log_sheet(ws_log, logs, skipped)
     _fr_remove_excluded_output_sheets(wb)

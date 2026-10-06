@@ -170,6 +170,195 @@ class StvSectionsWorkbookTests(unittest.TestCase):
         self.assertEqual(contexts['fixture.sor']['section_pairs'], [(0.2, 0.2)])
 
 
+class SelectedRangeWorkbookTests(unittest.TestCase):
+    @staticmethod
+    def _event(event_no: int, event_type: str, distance_km: float, loss_db: Optional[float]) -> converter.EventRow:
+        return converter.EventRow(
+            file_name='fixture.sor',
+            event_no=str(event_no),
+            event_type=event_type,
+            distance_m=distance_km * 1000.0,
+            distance_km=distance_km,
+            wavelength_nm='1550',
+            loss_db=loss_db,
+            reflectance_db=-45.0 if event_type == 'Reflective' else None,
+            slope_dbkm=0.2,
+            total_loss_db=None,
+            note_original='',
+            label=f'{event_no}{"E" if event_type == "Fiber End" else "A"}',
+        )
+
+    @classmethod
+    def _fixture(cls):
+        summary = converter.FileSummary(
+            file_name='fixture.sor',
+            fiber='Fiber 1',
+            wavelength_display='1550 nm',
+            total_loss_db=2.5,
+            length_km=10.0,
+            attenuation_dbkm=0.25,
+            splice_points=[],
+            end_distance_km=10.0,
+            graph_end_km=10.0,
+            graph_curve_max_km=10.0,
+            source_format='SOR',
+            parsed_total_loss_db=2.5,
+            route_corrected_total_loss_db=None,
+            loss_source_used='fixture route total',
+            total_loss_selection_reason='Giữ suy hao toàn tuyến của fixture.',
+        )
+        events = [
+            cls._event(1, 'Launch Level', 0.0, None),
+            cls._event(2, 'Non-Reflective', 2.0, 0.6),
+            cls._event(3, 'Non-Reflective', 5.0, 0.8),
+            cls._event(4, 'Non-Reflective', 9.0, 0.9),
+            cls._event(5, 'Fiber End', 10.0, None),
+        ]
+        route_graph = converter._assess_graph_length(
+            summary,
+            expected_route_km=10.0,
+            jumper_excluded_m=0.0,
+            length_tolerance_km=0.3,
+            graph_reach_tolerance_km=0.3,
+            event_shortfall_tolerance_km=0.3,
+            overlength_tolerance_km=0.0,
+        )
+        contexts = {
+            summary.file_name: {
+                'events': events,
+                'metadata': {'fiber_id': 'Fiber 1', 'wavelength_nm': 1550},
+                'graph_assessment': route_graph,
+                'segment_assessment': converter.SegmentAssessment(
+                    start_km=4.0,
+                    end_km=7.0,
+                    span_km=3.0,
+                    event_count=1,
+                    segment_total_loss_db=1.2,
+                    segment_attenuation_dbkm=0.4,
+                    max_positive_event_loss_db=0.8,
+                    max_negative_event_loss_db=None,
+                    note='Fixture selected range.',
+                    recommendation='',
+                    method='Fixture segment calculation.',
+                ),
+                'segment_event_rows': [],
+                'raw_trace_series': None,
+                'section_fit_rows': [],
+                'orl_display': None,
+                'orl_status': 'Unknown',
+            }
+        }
+        return [summary], contexts
+
+    @staticmethod
+    def _event_header_distances(ws, row: int, start_col: int, step: int = 1) -> list[float]:
+        values: list[float] = []
+        for col in range(start_col, ws.max_column + 1, step):
+            value = ws.cell(row, col).value
+            if isinstance(value, (int, float)):
+                values.append(float(value))
+        return values
+
+    @staticmethod
+    def _section_lengths(ws) -> list[float]:
+        values: list[float] = []
+        for col in range(3, ws.max_column + 1, 2):
+            value = ws.cell(2, col).value
+            if isinstance(value, (int, float)):
+                values.append(float(value))
+        return values
+
+    def _build(self, output_mode: str, scope: str):
+        summaries, contexts = self._fixture()
+        with patch.object(
+            converter,
+            '_fr_build_context',
+            return_value=(summaries, [], {'fixture.sor': b'fixture'}, contexts),
+        ):
+            return converter.build_workbook_from_uploads(
+                [('fixture.sor', b'fixture')],
+                threshold_db=0.5,
+                deviation_m=10.0,
+                expected_route_km=10.0,
+                graph_reach_tolerance_km=0.3,
+                event_shortfall_tolerance_km=0.3,
+                segment_start_km=4.0,
+                segment_end_km=7.0,
+                section_export_scope=scope,
+                section_measurement_mode='event',
+                output_mode=output_mode,
+            )
+
+    def test_fastreporter_selected_range_limits_events_loss_and_graph(self) -> None:
+        workbook = load_workbook(self._build('fastreporter', 'selected_range'), data_only=False)
+
+        self.assertEqual(self._event_header_distances(workbook['Events'], 3, 3, 2), [5.0])
+        self.assertEqual(workbook['Link Results'].cell(3, 16).value, 3.0)
+        self.assertEqual(workbook['Link Results'].cell(3, 19).value, 1.2)
+        self.assertEqual(workbook['Link Results'].cell(3, 25).value, 1)
+        self.assertAlmostEqual(sum(self._section_lengths(workbook['Sections'])), 3.0)
+        self.assertEqual(workbook['Route Analysis'].cell(2, 3).value, 3.0)
+        self.assertEqual(workbook['Route Analysis'].cell(2, 7).value, 3.0)
+        self.assertEqual(workbook['Route Analysis'].cell(2, 12).value, 'Đủ tuyến')
+
+    def test_stv_selected_range_keeps_core_assessment_on_full_route(self) -> None:
+        workbook = load_workbook(self._build('stv', 'selected_range'), data_only=False)
+        main = workbook['Bảng sự kiện']
+
+        self.assertEqual(self._event_header_distances(main, 5, 10), [5.0])
+        self.assertEqual(main.cell(6, 1).value, 'Đủ tuyến')
+        self.assertEqual(main.cell(6, 6).value, 1.2)
+        self.assertEqual(main.cell(6, 7).value, 3.0)
+        self.assertEqual(main.cell(6, 8).value, 0.4)
+        self.assertEqual(main.cell(6, 9).value, 'Đạt')
+        self.assertAlmostEqual(sum(self._section_lengths(workbook['Sections'])), 3.0)
+
+        graph = workbook['Kiểm tra đồ thị']
+        self.assertEqual(graph.cell(2, 7).value, 3.0)
+        self.assertEqual(graph.cell(2, 9).value, 3.0)
+        self.assertEqual(graph.cell(2, 14).value, 'Đủ tuyến')
+        self.assertEqual(graph.cell(2, 16).value, 1.2)
+        self.assertEqual(graph.cell(2, 18).value, 'Tính lại theo đoạn đã chọn')
+
+    def test_all_scope_keeps_existing_full_route_output(self) -> None:
+        workbook = load_workbook(self._build('fastreporter', 'all'), data_only=False)
+
+        self.assertEqual(self._event_header_distances(workbook['Events'], 3, 3, 2), [2.0, 5.0, 9.0])
+        self.assertEqual(workbook['Link Results'].cell(3, 16).value, 10.0)
+        self.assertEqual(workbook['Link Results'].cell(3, 19).value, 2.5)
+        self.assertEqual(workbook['Route Analysis'].cell(2, 3).value, 10.0)
+
+    def test_selected_graph_only_excludes_jumper_overlap_inside_range(self) -> None:
+        summaries, _contexts = self._fixture()
+        summary = summaries[0]
+
+        from_route_start = converter._fr_assess_graph_for_selected_range(
+            summary,
+            0.0,
+            7.0,
+            jumper_excluded_m=500.0,
+            length_tolerance_km=0.3,
+            graph_reach_tolerance_km=0.3,
+            event_shortfall_tolerance_km=0.3,
+            overlength_tolerance_km=0.0,
+        )
+        after_jumper = converter._fr_assess_graph_for_selected_range(
+            summary,
+            4.0,
+            7.0,
+            jumper_excluded_m=500.0,
+            length_tolerance_km=0.3,
+            graph_reach_tolerance_km=0.3,
+            event_shortfall_tolerance_km=0.3,
+            overlength_tolerance_km=0.0,
+        )
+
+        self.assertEqual(from_route_start.jumper_excluded_km, 0.5)
+        self.assertEqual(from_route_start.net_graph_length_km, 6.5)
+        self.assertEqual(after_jumper.jumper_excluded_km, 0.0)
+        self.assertEqual(after_jumper.net_graph_length_km, 3.0)
+
+
 class TotalLossSelectionTests(unittest.TestCase):
     @staticmethod
     def _summary(
